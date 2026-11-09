@@ -219,6 +219,6 @@ app/
   routes.py        Starlette 路由
   main.py          入口
 frontend/index.html
-static/style.css  static/app.js
-tests/test_api.py
+static/style.css  static/app.js  static/markdown.js
+tests/test_api.py  tests/test_markdown.py  tests/markdown.test.js
 ```

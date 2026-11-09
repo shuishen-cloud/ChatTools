@@ -240,7 +240,7 @@ function renderMessages() {
            <button class="tool-btn" data-act="save-edit" data-id="${m.id}">保存为分支</button>
            <button class="tool-btn" data-act="cancel-edit">取消</button>
          </div>`
-      : `<div class="msg-body">${esc(m.content) || (meta.status === "error" ? "" : "…")}</div>`;
+      : `<div class="msg-body md">${m.content ? MD.render(m.content) : (meta.status === "error" ? "" : "…")}</div>`;
     return `
       <div class="msg ${m.role} ${dim} ${faved} ${meta.status === "error" ? "error-msg" : ""}"
            data-id="${m.id}">
@@ -450,7 +450,7 @@ async function generateReply({ fromId = null } = {}) {
     <details class="thinking-block" id="stream-thinking" hidden open>
       <summary>💭 思考过程</summary><div class="thinking-body"></div>
     </details>
-    <div class="msg-body cursor-blink" id="stream-body"></div>`;
+    <div class="msg-body md cursor-blink" id="stream-body"></div>`;
   $("#messages").appendChild(holder);
   holder.scrollIntoView({ behavior: "smooth", block: "end" });
 
@@ -459,6 +459,16 @@ async function generateReply({ fromId = null } = {}) {
   let text = "";
   let thinkingText = "";
   let savedId = null;
+  // 流式渲染节流：避免每个 token 都全量重解析 Markdown
+  let renderPending = false;
+  const scheduleRender = () => {
+    if (renderPending) return;
+    renderPending = true;
+    requestAnimationFrame(() => {
+      renderPending = false;
+      bodyEl().innerHTML = MD.render(text);
+    });
+  };
   let errMsg = "";
 
   try {
@@ -500,7 +510,7 @@ async function generateReply({ fromId = null } = {}) {
           if (evt.type === "message_created") savedId = evt.id;
           if (evt.type === "text") {
             text += evt.text;
-            bodyEl().textContent = text;
+            scheduleRender();
             holder.scrollIntoView({ block: "end" });
           }
           if (evt.type === "thinking") {
@@ -525,6 +535,8 @@ async function generateReply({ fromId = null } = {}) {
     if (e.name === "AbortError") errMsg = "__aborted__";
     else errMsg = e.message;
   } finally {
+    // 确保最后一帧已渲染（节流可能丢掉尾部更新）
+    if (text && $("#stream-body")) $("#stream-body").innerHTML = MD.render(text);
     composerState.streaming = false;
     composerState.abort = null;
     btnSend.disabled = false;
@@ -534,7 +546,7 @@ async function generateReply({ fromId = null } = {}) {
     if (errMsg && errMsg !== "__aborted__") {
       holder.classList.add("error-msg");
       bodyEl().classList.remove("cursor-blink");
-      bodyEl().textContent = text || "（无内容）";
+      bodyEl().innerHTML = MD.render(text || "（无内容）");
       const errLine = document.createElement("div");
       errLine.className = "test-result bad";
       errLine.textContent = "✗ " + errMsg;
@@ -884,6 +896,7 @@ async function testKey() {
 
 /* ---------------------------------------------------------------- 事件绑定 */
 function bind() {
+  MD.bindCopy(document.body);
   $("#btn-menu").onclick = () => $("#sidebar").classList.toggle("open");
   $("#btn-new").onclick = newConversation;
   $("#btn-new-folder").onclick = newFolder;

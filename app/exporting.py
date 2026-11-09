@@ -14,6 +14,7 @@ import secrets
 from datetime import datetime
 from urllib.parse import quote
 
+from . import markdown as md
 from .conversations import get_conversation, get_messages
 from .db import db, tx
 from .utils import new_id, now
@@ -120,8 +121,30 @@ h1{{font-size:1.5rem;margin:0 0 8px}}.meta{{color:var(--dim);font-size:.85rem;ma
 .m.user{{border-left:3px solid var(--acc)}}.m.assistant{{border-left:3px solid #37c98b}}
 .m.system{{border-left:3px solid #8b95a7}}.m.tool{{border-left:3px solid #d9a23b}}
 .fav{{color:#e8c15a}}.tag{{background:#232838;color:#9aa6bf;border-radius:999px;padding:1px 8px;font-size:.72rem}}
-.content{{white-space:pre-wrap;word-break:break-word}}
+.content{{word-break:break-word}}
 .content code{{background:#0b0d12;padding:1px 5px;border-radius:4px;font-size:.9em}}
+.md p{{margin:0 0 .6em}}.md p:last-child{{margin-bottom:0}}
+.md .md-h{{margin:.8em 0 .4em;line-height:1.35;font-size:1.1em}}
+.md ul,.md ol{{margin:.3em 0 .6em;padding-left:1.35em}}
+.md blockquote{{margin:.5em 0;padding:.35em .8em;border-left:3px solid #39415a;
+  background:#10131b;border-radius:0 8px 8px 0;color:#b9c2d6}}
+.md hr{{border:none;border-top:1px solid #262a36;margin:.9em 0}}
+.md a{{color:#6b8afd;text-decoration:none}}.md a:hover{{text-decoration:underline}}
+.code-wrap{{margin:.5em 0}}.code-wrap pre{{margin:0;background:#0b0d12;border:1px solid #262a36;
+  border-radius:8px;padding:10px;overflow-x:auto;font-size:12.5px}}
+.code-lang{{font-size:10.5px;color:#8b95a7;padding:0 2px 3px}}
+.table-wrap{{overflow-x:auto;margin:.5em 0}}
+.md table{{border-collapse:collapse;width:100%;font-size:.93em}}
+.md th,.md td{{border:1px solid #262a36;padding:6px 10px;text-align:left}}
+.md th{{background:#1b1f2a}}
+.md .tasklist{{list-style:none;padding-left:.2em}}
+.md .tasklist li{{display:flex;gap:7px;align-items:flex-start}}
+.md .tasklist .box{{flex:0 0 auto;width:14px;height:14px;margin-top:.25em;
+  border:1.5px solid #4a5468;border-radius:4px;font-size:10px;line-height:12px;
+  text-align:center;color:#37c98b}}
+.md .tasklist li.done .box{{border-color:#37c98b;background:#133527}}
+.md .tasklist li.done{{color:#8b95a7}}
+.md .md-img{{max-width:100%;border-radius:8px;display:block;margin:.5em 0}}
 .branch{{color:var(--dim);font-size:.78rem;margin-top:8px;border-top:1px dashed var(--line);padding-top:6px}}
 footer{{color:var(--dim);font-size:.78rem;text-align:center;margin-top:40px}}
 </style></head><body><div class="wrap">
@@ -136,14 +159,14 @@ def _to_html(conv: dict, msgs: list[dict]) -> str:
         if m.get("favorite"):
             badges.append('<span class="fav">⭐ 收藏</span>')
         badges += [f'<span class="tag">{html.escape(t)}</span>' for t in m.get("tags", [])]
-        content = html.escape(m["content"])
+        content = md.render(m["content"])
         branch = (f'<div class="branch">🔀 此消息有 {m["child_count"]} 个分支</div>'
                   if m.get("child_count", 0) > 1 else "")
         parts.append(
             f'<div class="m {m["role"]}"><div class="role">'
             f'<span>{ROLE_LABEL.get(m["role"], m["role"])}</span>'
             f'<span style="opacity:.6">{m["created_at"]}</span>{"".join(badges)}</div>'
-            f'<div class="content">{content}</div>{branch}</div>')
+            f'<div class="content md">{content}</div>{branch}</div>')
     meta_bits = [f"更新于 {conv['updated_at']}"]
     if conv.get("model"):
         meta_bits.append(html.escape(conv["model"]))

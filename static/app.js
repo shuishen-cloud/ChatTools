@@ -647,8 +647,7 @@ async function archiveConv() {
   toast("已归档");
   state.activeConv = null;
   await loadConvs();
-  if (state.convs.length) await openConv(state.convs[0].id);
-  else await ensureConversation();
+  await ensureConversation();
 }
 
 async function deleteConv() {
@@ -657,18 +656,31 @@ async function deleteConv() {
   state.activeConv = null;
   toast("已删除");
   await loadConvs();
-  if (state.convs.length) await openConv(state.convs[0].id);
-  else await ensureConversation();
+  await ensureConversation();
 }
 
-/** 保证总有一个可用的会话：没有就自动建一个空会话 */
+/** 打开应用时进入一个「可立即输入」的界面。
+ *
+ * 关键行为：不要自动跳进历史会话——那会让用户每次打开都被塞进
+ * 某个旧对话里。若当前没有选中会话，就开一张新的空白会话；
+ * 历史会话由用户自己在左侧列表选择。
+ */
 async function ensureConversation() {
-  if (state.activeConv && state.convs.some((c) => c.id === state.activeConv.id)) return;
-  if (state.convs.length) return openConv(state.convs[0].id);
+  // 已经选中某个会话（如从历史里点开）则尊重它
+  if (state.activeConv) return;
+
+  // 复用最近一个「还没说过话」的空会话，避免每次刷新都堆积空壳
+  const empty = state.convs.find((c) => c.message_count === 0);
+  if (empty) return openConv(empty.id);
+
   const conv = await api("/api/conversations", {
     method: "POST",
     body: { title: "未命名会话", folder_ids: state.scopeFolder ? [state.scopeFolder] : [] },
   });
+  // 建完后把其它遗留空会话收掉，只留这一个
+  api("/api/maintenance/prune-empty",
+    { method: "POST", body: { keep: conv.id, max_empty: 1 } })
+    .catch(() => {});
   await loadConvs();
   return openConv(conv.id);
 }

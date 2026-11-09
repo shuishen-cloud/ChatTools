@@ -295,3 +295,27 @@ def list_favorites(q: str | None = None, tag: str | None = None) -> list[dict]:
 def set_favorite(msg_id: str, favorite: bool) -> None:
     with tx() as conn:
         conn.execute("UPDATE message SET favorite=? WHERE id=?", (1 if favorite else 0, msg_id))
+
+
+def prune_empty_conversations(keep: str | None = None, max_empty: int = 1) -> int:
+    """清理多余的空会话，避免每次打开应用都堆积空壳。
+
+    保留 `keep`（当前正在用的）以及最近的 max_empty-1 个空会话。
+    返回删除数量。
+    """
+    with tx() as conn:
+        rows = conn.execute(
+            """SELECT c.id FROM conversation c
+               WHERE c.archived=0
+                 AND NOT EXISTS (SELECT 1 FROM message m WHERE m.conv_id = c.id)
+               ORDER BY c.created_at DESC""").fetchall()
+        ids = [r["id"] for r in rows]
+        if keep and keep in ids:
+            ids.remove(keep)
+            allowed = max(0, max_empty - 1)
+        else:
+            allowed = max_empty
+        doomed = ids[allowed:]
+        for cid in doomed:
+            conn.execute("DELETE FROM conversation WHERE id=?", (cid,))
+        return len(doomed)

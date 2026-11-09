@@ -923,5 +923,37 @@ class ChatToolTest(unittest.TestCase):
         self.assertEqual({i["question"] for i in items}, {"问题一", "问题二", "问题三"})
         self.client.delete("/api/llm/config/openai")
 
+    # -------------------------------------------------- 启动不自动跳进历史会话
+    def test_50_prune_empty_conversations(self):
+        """多次打开应用不应堆积空会话。"""
+        made = [self._post("/api/conversations", {})["id"] for _ in range(4)]
+        r = self.client.post("/api/maintenance/prune-empty",
+                             json={"keep": made[-1], "max_empty": 1})
+        self.assertEqual(r.status_code, 200)
+        self.assertGreaterEqual(r.json()["data"]["removed"], 3)
+        ids = [c["id"] for c in self.client.get("/api/conversations").json()["data"]]
+        self.assertIn(made[-1], ids, "要保留的那个不能被删")
+        # 有消息的会话绝不能删
+        conv = self._post("/api/conversations", {"title": "有内容"})
+        self._post(f"/api/conversations/{conv['id']}/messages",
+                   {"role": "user", "content": "hi"})
+        self.client.post("/api/maintenance/prune-empty",
+                         json={"keep": made[-1], "max_empty": 0})
+        ids = [c["id"] for c in self.client.get("/api/conversations").json()["data"]]
+        self.assertIn(conv["id"], ids, "非空会话不应被清理")
+
+    def test_51_startup_does_not_jump_into_history(self):
+        """前端启动时不得自动打开列表第一个历史会话。"""
+        js = self.client.get("/static/app.js").text
+        # ensureConversation 里不能出现「打开 convs[0]」
+        m = js[js.index("async function ensureConversation"):]
+        m = m[:m.index("async function newConversation")]
+        self.assertNotIn("convs[0]", m,
+                         "启动不应自动跳进第一个历史会话")
+        # 应该复用空会话，否则新建一个
+        self.assertIn("message_count === 0", m)
+        self.assertIn("/api/conversations", m)
+        self.assertIn('method: "POST"', m)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

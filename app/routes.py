@@ -41,6 +41,13 @@ async def api_conv_create(request):
     return ok(conv)
 
 
+async def api_prune_empty(request):
+    """清理多余的空会话（前端在启动时调用）。"""
+    body = await read_json(request)
+    n = C.prune_empty_conversations(keep=body.get("keep"), max_empty=body.get("max_empty", 1))
+    return ok({"removed": n})
+
+
 async def api_conv_get(request):
     conv_id = request.path_params["conv_id"]
     conv = C.get_conversation(conv_id)
@@ -437,6 +444,7 @@ def create_app() -> Starlette:
         Route("/api/llm/test", api_llm_test, methods=["POST"]),
         Route("/api/conversations", api_conversations, methods=["GET"]),
         Route("/api/conversations", api_conv_create, methods=["POST"]),
+        Route("/api/maintenance/prune-empty", api_prune_empty, methods=["POST"]),
         Route("/api/conversations/{conv_id}", api_conv_get, methods=["GET"]),
         Route("/api/conversations/{conv_id}", api_conv_update, methods=["PATCH", "PUT"]),
         Route("/api/conversations/{conv_id}", api_conv_delete, methods=["DELETE"]),

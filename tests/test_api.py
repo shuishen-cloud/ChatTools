@@ -880,5 +880,48 @@ class ChatToolTest(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertIn("min-width: 0", m.group(1), ".main 缺少 min-width:0 会挤掉右栏")
 
+    def test_48_ask_window_accumulates_turns(self):
+        """悬浮窗口必须是持续对话：每轮追加，不能清空重来。"""
+        js = self.client.get("/static/panels.js").text
+        css = self.client.get("/static/style.css").text
+
+        # 必须有「追加一轮」的能力
+        self.assertIn("function appendTurn", js)
+        self.assertIn("body.appendChild(turn)", js)
+        # 提交时走 appendTurn，而不是重置整个 body
+        self.assertRegex(js, r"const turn = appendTurn\(")
+        # 不得在 submit 里清空对话区
+        submit_body = js[js.index("async function submit()"):]
+        submit_body = submit_body[:submit_body.index("async function loadHistory")]
+        self.assertNotIn('$("#ask-body").innerHTML = `', submit_body,
+                         "submit 不应重写整个对话区")
+
+        # 有「待引用」条让用户确认本次选中内容
+        self.assertIn("ask-pending", js)
+        self.assertIn(".ask-pending", css)
+        self.assertIn(".ask-turn", css)
+
+    def test_49_ask_endpoint_is_stateless_per_call(self):
+        """后端每次提问独立存储，前端累积展示，两者不冲突。"""
+        import asyncio
+        from unittest import mock
+
+        async def fake(cfg, m, model, effort, system):
+            yield {"type": "text", "text": "答" + m[0]["content"][-1]}
+            yield {"type": "done", "info": {}}
+
+        self.client.put("/api/llm/config",
+                        json={"provider": "openai", "api_key": "sk-acc"})
+        conv = self._post("/api/conversations", {"title": "累积"})
+        cid = conv["id"]
+        with mock.patch("app.llm.stream_completion", fake):
+            for i, q in enumerate(["问题一", "问题二", "问题三"]):
+                self.client.post(f"/api/conversations/{cid}/ask", json={
+                    "source_text": f"引文{i}", "question": q, "provider": "openai"})
+        items = self.client.get(f"/api/conversations/{cid}/snippets").json()["data"]
+        self.assertEqual(len(items), 3, "三次提问应各自独立留存")
+        self.assertEqual({i["question"] for i in items}, {"问题一", "问题二", "问题三"})
+        self.client.delete("/api/llm/config/openai")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -453,6 +453,23 @@ button, input, textarea, select { font: inherit; color: inherit; }
   align-items: flex-end; flex-wrap: wrap;
 }
 .ask-actions { display: flex; gap: 5px; width: 100%; margin-top: 5px; }
+
+/* 一轮问答 */
+.ask-turn { margin-bottom: 16px; padding-bottom: 14px;
+  border-bottom: 1px solid var(--line); }
+.ask-turn:last-child { border-bottom: none; margin-bottom: 0; }
+
+/* 待提问的引文条 */
+.ask-pending {
+  display: flex; align-items: center; gap: 7px; padding: 6px 12px;
+  background: #1b1f2a; border-top: 1px solid var(--line); font-size: 11.5px;
+}
+.ask-pending .p-label { color: var(--acc); flex: 0 0 auto; }
+.ask-pending .p-text { color: var(--dim); flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.ask-pending .p-clear { border: none; background: transparent; color: var(--dim);
+  cursor: pointer; font-size: 12px; padding: 0 3px; }
+.ask-pending .p-clear:hover { color: var(--fg); }
 .ask-input-row textarea {
   flex: 1; background: var(--card); border: 1px solid var(--line);
   border-radius: 9px; padding: 8px 10px; resize: none; outline: none;

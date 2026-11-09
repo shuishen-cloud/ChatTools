@@ -193,6 +193,7 @@ const AskPanel = (() => {
         <button class="ask-head-btn" id="ask-close">✕</button>
       </div>
       <div class="ask-body" id="ask-body"></div>
+      <div class="ask-pending" id="ask-pending" hidden></div>
       <div class="ask-input-row">
         <textarea id="ask-input" rows="2" placeholder="针对选中内容提问…"></textarea>
         <button class="btn primary" id="ask-send">问</button>
@@ -340,23 +341,62 @@ const AskPanel = (() => {
     panel.classList.add("open");
     state.open = true;
     $("#ask-title").textContent = "悬浮提问";
+    // 记下待提问的引文；真正的渲染在 submit 时追加
     renderCompose(question);
     if (!question) $("#ask-input").focus();
   }
 
+  /** 每轮问答在窗口里追加一块，而不是清空重来 */
+  function appendTurn(quote, question, answerHtml) {
+    const body = $("#ask-body");
+    // 首次使用时清掉引导文案
+    const hint = body.querySelector(".ask-empty-hint");
+    if (hint) hint.remove();
+
+    const turn = document.createElement("div");
+    turn.className = "ask-turn";
+    turn.innerHTML = `
+      <div class="ask-quote">${esc(quote.slice(0, 1200))}${
+        quote.length > 1200 ? "…" : ""}</div>
+      ${question ? `<div class="ask-q">${esc(question)}</div>` : ""}
+      <div class="ask-a md">${answerHtml || ""}</div>`;
+    body.appendChild(turn);
+    body.scrollTop = body.scrollHeight;
+    return turn;
+  }
+
+  /** 只更新最后一轮引文（用户重新选了文字但还没提问时） */
   function renderCompose(preset = "") {
-    $("#ask-body").innerHTML = `
-      <div class="ask-quote">${esc(state.sourceText.slice(0, 1200))}${
-        state.sourceText.length > 1200 ? "…" : ""}</div>
-      <div id="ask-stream"></div>`;
     $("#ask-input").value = preset;
+    const body = $("#ask-body");
+    if (!body.querySelector(".ask-turn")) {
+      body.innerHTML = `<p class="hint ask-empty-hint">选中对话里的任意文字，
+        点「💬 就此提问」；回答会追问式追加在这里，不会打断主对话。</p>`;
+    }
+    // 待提问引文条：让你看清这次选中的是哪段
+    const pending = $("#ask-pending");
+    if (state.sourceText) {
+      pending.hidden = false;
+      pending.innerHTML = `<span class="p-label">将引用</span>
+        <span class="p-text">${esc(state.sourceText.slice(0, 90))}${
+          state.sourceText.length > 90 ? "…" : ""}</span>
+        <button class="p-clear" title="取消引用">✕</button>`;
+      pending.querySelector(".p-clear").onclick = () => {
+        state.sourceText = "";
+        state.messageId = null;
+        pending.hidden = true;
+      };
+    } else {
+      pending.hidden = true;
+      pending.innerHTML = "";
+    }
   }
 
   function renderHome() {
     const items = state.history;
     if (!items.length) {
-      $("#ask-body").innerHTML = `<p class="hint">选中对话里的任意文字，点「💬 就此提问」；
-        回答会出现在这里，不会打断主对话。</p>`;
+      $("#ask-body").innerHTML = `<p class="hint ask-empty-hint">选中对话里的任意文字，
+        点「💬 就此提问」；回答会追加在这里，不会打断主对话。</p>`;
       return;
     }
     $("#ask-body").innerHTML = items.map((s) => `
@@ -396,10 +436,12 @@ const AskPanel = (() => {
     state.lastQuestion = q;
     state.lastAnswer = "";
     $("#ask-send").disabled = true;
-    const stream = $("#ask-stream");
-    stream.innerHTML = `<div class="ask-q">${esc(q)}</div>
-      <div class="ask-a md" id="ask-answer"></div>`;
-    const out = $("#ask-answer");
+    $("#ask-input").value = "";
+
+    // 追加一轮（不清空已有对话）
+    const turn = appendTurn(state.sourceText, q, "");
+    const out = turn.querySelector(".ask-a");
+    out.classList.add("cursor-blink");
     let text = "";
     let err = "";
 
@@ -445,6 +487,8 @@ const AskPanel = (() => {
               text += evt.text;
               state.lastAnswer = text;
               out.innerHTML = MD.render(text);
+              const body = $("#ask-body");
+              body.scrollTop = body.scrollHeight;
             }
             if (evt.type === "error") err = evt.message;
           }
@@ -456,11 +500,17 @@ const AskPanel = (() => {
       state.streaming = false;
       state.abort = null;
       $("#ask-send").disabled = false;
+      out.classList.remove("cursor-blink");
       if (err) {
         out.innerHTML += `<div class="test-result bad" style="margin-top:8px">✗ ${esc(err)}</div>`;
+      } else if (!text) {
+        out.innerHTML = '<span class="hint">（无回答）</span>';
       }
-      if (text) out.innerHTML = MD.render(text);
       await loadHistory();
+      // 本轮已用掉这段引文；下次选词会重新设置
+      state.sourceText = "";
+      state.messageId = null;
+      renderCompose();
     }
   }
 

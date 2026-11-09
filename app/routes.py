@@ -329,14 +329,19 @@ async def api_board_update(request):
 
 
 async def api_board_node_create(request):
+    """支持两种节点：
+    1) {message_id}: 引用某条消息
+    2) {content}: 自由文本（悬浮问答、手写笔记），不需要任何会话
+    """
     body = await read_json(request)
     mid = body.get("message_id")
-    if not mid:
-        return err("缺少 message_id")
+    text = (body.get("content") or "").strip()
+    if not mid and not text:
+        return err("需要 message_id 或 content")
     return ok(B.add_node(request.path_params["board_id"], mid,
                          body.get("conv_id"), float(body.get("x") or 0),
                          float(body.get("y") or 0), body.get("note") or "",
-                         body.get("color") or "#6b8afd"))
+                         body.get("color") or "#6b8afd", text))
 
 
 async def api_board_node(request):

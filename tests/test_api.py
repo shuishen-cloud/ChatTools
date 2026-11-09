@@ -1031,5 +1031,56 @@ class ChatToolTest(unittest.TestCase):
         self.assertEqual(cols["conv_id"]["notnull"], 0,
                          "conv_id 不应为 NOT NULL，否则无会话时无法提问")
 
+    # -------------------------------------------------- 悬浮问答直接入画板（不建会话）
+    def test_57_board_text_node_without_conversation(self):
+        """把悬浮问答加入画板，不应凭空创建会话或假消息。"""
+        before = len(self.client.get("/api/conversations").json()["data"])
+        board = self._post("/api/boards", {"name": "自由文本板"})
+        node = self._post(f"/api/boards/{board['id']}/nodes", {
+            "content": "**问：** 这是什么\n\n**答：** 一段解释",
+            "note": "悬浮问答",
+        })
+        self.assertIsNone(node["message_id"], "自由文本节点不应绑定消息")
+        # 会话数量不得变化（不得偷偷建会话）
+        after = len(self.client.get("/api/conversations").json()["data"])
+        self.assertEqual(before, after, "加入画板不应创建新会话")
+
+        detail = self.client.get(f"/api/boards/{board['id']}").json()["data"]
+        n = detail["nodes"][0]
+        self.assertIn("这是什么", n["content"])
+        self.assertFalse(n["missing"], "文本节点不应标记为失效")
+        self.assertEqual(n["role"], "note")
+        self.assertEqual(n["note"], "悬浮问答")
+
+    def test_58_board_node_requires_message_or_content(self):
+        board = self._post("/api/boards", {"name": "空节点"})
+        r = self.client.post(f"/api/boards/{board['id']}/nodes", json={})
+        self.assertEqual(r.status_code, 400)
+        r2 = self.client.post(f"/api/boards/{board['id']}/nodes",
+                              json={"content": "  "})
+        self.assertEqual(r2.status_code, 400, "纯空白内容应被拒绝")
+
+    def test_59_text_node_supports_edges(self):
+        """自由文本节点也要能连线、能拖拽。"""
+        board = self._post("/api/boards", {"name": "文本连线"})
+        a = self._post(f"/api/boards/{board['id']}/nodes", {"content": "论点 A"})
+        b = self._post(f"/api/boards/{board['id']}/nodes", {"content": "论点 B"})
+        e = self._post(f"/api/boards/{board['id']}/edges",
+                       {"from_node": a["id"], "to_node": b["id"], "label": "推导"})
+        self.assertEqual(e["label"], "推导")
+        r = self.client.patch(f"/api/board-nodes/{a['id']}", json={"x": 120, "y": 80})
+        self.assertEqual((r.json()["data"]["x"], r.json()["data"]["y"]), (120, 80))
+
+    def test_60_frontend_send_to_board_not_gated(self):
+        """前端 sendToBoard 不得要求会话，也不得创建假消息。"""
+        js = self.client.get("/static/panels.js").text
+        body = js[js.index("async function sendToBoard"):]
+        body = body[:body.index("/* 选中文本")]
+        self.assertNotIn('if (!conv) return toast("先打开一个会话")', body,
+                         "加入画板不应要求先打开会话")
+        self.assertNotIn("/messages", body,
+                         "不应先创建一条消息再入画板")
+        self.assertIn("Board.addText", body)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

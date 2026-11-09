@@ -162,6 +162,7 @@ const AskPanel = (() => {
     history: [],
     lastQuestion: "",
     lastAnswer: "",
+    lastQuote: "",
   };
 
   function bubbleEl() {
@@ -260,27 +261,21 @@ const AskPanel = (() => {
 
   /* 把「引文 + 问题 + 回答」三者作为一条消息加入画板 */
   async function sendToBoard() {
-    const conv = state.activeConv;
-    if (!conv) return toast("先打开一个会话");
-    const answer = state.lastAnswer || "";
+    // 悬浮问答是独立的：不需要会话，也不需要写进任何对话
     const question = state.lastQuestion || "";
+    const answer = state.lastAnswer || "";
+    const quote = state.lastQuote || "";
     if (!question) return toast("先提问，再把它加入画板");
 
-    // 先存成一条「提问记录」型消息，让画板能引用（用 assistant 角色承载）
-    const body = [
-      `**引文**：${state.sourceText.slice(0, 400)}`,
+    const content = [
+      quote ? `> 引文：${quote.slice(0, 300)}` : "",
       "",
-      `**问题**：${question}`,
+      `**问：** ${question}`,
       "",
-      `**回答**：`,
-      answer || "（无回答）",
-    ].join("\n");
+      answer ? `**答：**\n${answer}` : "**答：**（无回答）",
+    ].filter(Boolean).join("\n");
 
-    const msg = await api(`/api/conversations/${conv.id}/messages`, {
-      method: "POST",
-      body: { role: "assistant", content: body, meta: { from_snippet: true } },
-    });
-    await Board.addMessage(msg.id, conv.id);
+    await Board.addText(content, question.slice(0, 40));
     toast("已把这条问答加入画板");
   }
 
@@ -445,6 +440,7 @@ const AskPanel = (() => {
     $("#ask-input").value = "";
 
     // 追加一轮（不清空已有对话）
+    state.lastQuote = state.sourceText;
     const turn = appendTurn(state.sourceText, q, "");
     const out = turn.querySelector(".ask-a");
     out.classList.add("cursor-blink");
@@ -638,7 +634,8 @@ const Board = (() => {
            data-id="${n.id}" style="left:${n.x}px;top:${n.y}px;border-left-color:${n.color}">
         <div class="bnode-meta">
           <span>${roleIcon(n.role)}</span>
-          <span class="src">${esc(n.conv_title || "手动节点")}</span>
+          <span class="src">${esc(n.conv_title
+            || (n.role === "note" ? "自由文本" : "手动节点"))}</span>
           ${n.missing ? '<span title="原消息已删除">⚠</span>' : ""}
         </div>
         <div class="bnode-note" contenteditable="true"
@@ -858,29 +855,46 @@ const Board = (() => {
   }
 
   /** 从消息底部按钮调用 */
-  async function addMessage(messageId, convId) {
+  /** 选择目标画板（没有就新建）。返回 board id 或 null。 */
+  async function pickBoard() {
     if (!state.boards.length) {
       const name = prompt("还没有画板，先建一个：", "新画板");
-      if (!name) return;
-      await api("/api/boards", { method: "POST", body: { name } });
+      if (!name) return null;
+      const b = await api("/api/boards", { method: "POST", body: { name } });
       await loadBoards();
+      return b.id;
     }
-    let targetId = state.board?.id || state.boards[0]?.id;
-    if (state.boards.length > 1) {
-      const options = state.boards.map((b, i) => `${i + 1}. ${b.name}`).join("\n");
-      const pick = prompt(`加入哪个画板？输入序号：\n${options}`, "1");
-      if (!pick) return;
-      const idx = parseInt(pick, 10) - 1;
-      if (Number.isNaN(idx) || !state.boards[idx]) return toast("序號无效");
-      targetId = state.boards[idx].id;
+    if (state.boards.length === 1) {
+      return state.board?.id || state.boards[0].id;
     }
-    await api(`/api/boards/${targetId}/nodes`, {
-      method: "POST",
-      body: { message_id: messageId, conv_id: convId },
-    });
+    const options = state.boards.map((b, i) => `${i + 1}. ${b.name}`).join("\n");
+    const pick = prompt(`加入哪个画板？输入序号：\n${options}`, "1");
+    if (!pick) return null;
+    const idx = parseInt(pick, 10) - 1;
+    if (Number.isNaN(idx) || !state.boards[idx]) {
+      toast("序号无效");
+      return null;
+    }
+    return state.boards[idx].id;
+  }
+
+  async function _insert(payload) {
+    const targetId = await pickBoard();
+    if (!targetId) return;
+    await api(`/api/boards/${targetId}/nodes`, { method: "POST", body: payload });
     state.dirty = true;
     if (state.board?.id === targetId) await loadBoard(targetId);
     toast("已加入画板，点顶部「画板」查看");
+  }
+
+  /** 把一条消息加入画板 */
+  async function addMessage(messageId, convId) {
+    return _insert({ message_id: messageId, conv_id: convId });
+  }
+
+  /** 把一段自由文本加入画板（不需要任何会话） */
+  async function addText(content, note) {
+    return _insert({ content, note: note || "" });
   }
 
   async function loadConvListQuietly() {
@@ -941,5 +955,5 @@ const Board = (() => {
     });
   }
 
-  return { bind, open, close, addMessage, loadBoards };
+  return { bind, open, close, addMessage, addText, loadBoards };
 })();

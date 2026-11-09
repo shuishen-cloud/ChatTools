@@ -39,8 +39,11 @@ def get_board(board_id: str) -> dict | None:
         for r in conn.execute(
                 "SELECT * FROM board_node WHERE board_id=? ORDER BY created_at", (board_id,)):
             n = row_to_dict(r)
-            # 联出消息内容，便于前端直接渲染
+            own = n.get("content") or ""
+            # 失效判定：没有可用内容即视为失效（引用消息被删且无自有文本）
+            n["missing"] = False
             if n["message_id"]:
+                # 引用消息：内容以消息为准
                 m = conn.execute(
                     "SELECT content, role, created_at FROM message WHERE id=?",
                     (n["message_id"],)).fetchone()
@@ -49,11 +52,15 @@ def get_board(board_id: str) -> dict | None:
                     n["role"] = m["role"]
                     n["missing"] = False
                 else:
-                    n["content"] = ""
-                    n["missing"] = True
+                    # 引用过消息但现在取不到 -> 失效引用
+                    n["content"] = own
+                    n["role"] = n.get("role") or "note"
+                    n["missing"] = not own
             else:
-                n["content"] = ""
-                n["missing"] = True
+                # 无 message_id：自由文本节点，或「引用消息已被删除」
+                n["content"] = own
+                n["role"] = "note"
+                n["missing"] = not own
             # 会话标题，便于辨识来源
             if n["conv_id"]:
                 c = conn.execute("SELECT title FROM conversation WHERE id=?",
@@ -106,8 +113,12 @@ def _touch(conn, board_id: str) -> None:
 
 def add_node(board_id: str, message_id: str | None, conv_id: str | None = None,
              x: float = 0, y: float = 0, note: str = "",
-             color: str = "#6b8afd") -> dict:
-    """把一条消息加入画板。同一消息在同一画板中不重复添加。"""
+             color: str = "#6b8afd", content: str = "") -> dict:
+    """把一条消息加入画板。同一消息在同一画板中不重复添加。
+
+    message_id 可为 None：此时用 content 作为节点自有文字，
+    用于把悬浮问答或自由笔记直接放到画板上，不依赖任何会话。
+    """
     with tx() as conn:
         if message_id:
             dup = conn.execute(
@@ -127,9 +138,9 @@ def add_node(board_id: str, message_id: str | None, conv_id: str | None = None,
             y = 40 + (count // 3) * 180
         nid = new_id("n_")
         conn.execute(
-            "INSERT INTO board_node(id,board_id,message_id,conv_id,x,y,note,color,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (nid, board_id, message_id, conv_id, x, y, note, color, now()))
+            "INSERT INTO board_node(id,board_id,message_id,conv_id,content,x,y,note,color,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (nid, board_id, message_id, conv_id, content, x, y, note, color, now()))
         _touch(conn, board_id)
         row = conn.execute("SELECT * FROM board_node WHERE id=?", (nid,)).fetchone()
     return row_to_dict(row)

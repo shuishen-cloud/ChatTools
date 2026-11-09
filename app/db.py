@@ -87,8 +87,11 @@ CREATE TABLE IF NOT EXISTS board (
 CREATE TABLE IF NOT EXISTS board_node (
     id          TEXT PRIMARY KEY,
     board_id    TEXT NOT NULL REFERENCES board(id) ON DELETE CASCADE,
+    -- message_id / conv_id 都可为空：节点可携带独立文字（自由文本或悬浮问答）
     message_id  TEXT REFERENCES message(id) ON DELETE SET NULL,
     conv_id     TEXT REFERENCES conversation(id) ON DELETE SET NULL,
+    -- 节点自有文字内容；来自消息时为空（内容从 message 取）
+    content     TEXT NOT NULL DEFAULT '',
     x           REAL NOT NULL DEFAULT 0,
     y           REAL NOT NULL DEFAULT 0,
     note        TEXT NOT NULL DEFAULT '',
@@ -189,8 +192,16 @@ def _migrate(conn) -> None:
         """)
 
 
+def _migrate_board_node_content(conn) -> None:
+    """给旧库的 board_node 补上 content 列（节点可持独立文字）。"""
+    cols = {c["name"] for c in conn.execute("PRAGMA table_info(board_node)")}
+    if "content" not in cols:
+        conn.execute("ALTER TABLE board_node ADD COLUMN content TEXT NOT NULL DEFAULT ''")
+
+
 def init_db() -> None:
     with db() as conn:
         # 先确保旧表存在，迁移才有的可改
         conn.executescript(SCHEMA)
         _migrate(conn)
+        _migrate_board_node_content(conn)

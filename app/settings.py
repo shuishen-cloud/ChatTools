@@ -15,23 +15,58 @@ from .db import db, tx
 from .utils import now
 
 PROVIDERS = {
+    "deepseek": {
+        "label": "DeepSeek",
+        # 官方原生接口，OpenAI 兼容协议
+        "protocol": "openai",
+        "key_group": "deepseek",       # 与 deepseek_anthropic 共享 Key
+        "env_key": "DEEPSEEK_API_KEY",
+        "env_key_alt": None,
+        "env_base": "DEEPSEEK_BASE_URL",
+        "default_base": "https://api.deepseek.com/v1",
+        "default_model": "deepseek-chat",
+        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "key_hint": "在 platform.deepseek.com 创建，形如 sk-...",
+    },
     "anthropic": {
         "label": "Anthropic (Claude)",
+        "protocol": "anthropic",
         "env_key": "ANTHROPIC_AUTH_TOKEN",
         "env_key_alt": "ANTHROPIC_API_KEY",
         "env_base": "ANTHROPIC_BASE_URL",
         "default_base": "https://api.anthropic.com",
         "default_model": "claude-sonnet-4-5",
+        "models": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
+        "key_hint": "Anthropic 官方 Key 或兼容网关 Token",
+    },
+    "deepseek_anthropic": {
+        "label": "DeepSeek (Anthropic 兼容)",
+        # DeepSeek 同时提供 /anthropic 端点，用 Anthropic 协议调用
+        "protocol": "anthropic",
+        "key_group": "deepseek",       # 与 deepseek 共享 Key
+        "env_key": "DEEPSEEK_API_KEY",
+        "env_key_alt": None,
+        "env_base": "DEEPSEEK_ANTHROPIC_BASE_URL",
+        "default_base": "https://api.deepseek.com/anthropic",
+        "default_model": "deepseek-chat",
+        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "key_hint": "同一个 DeepSeek Key，走 Anthropic 协议端点",
     },
     "openai": {
         "label": "OpenAI 兼容",
+        "protocol": "openai",
         "env_key": "OPENAI_API_KEY",
         "env_key_alt": None,
         "env_base": "OPENAI_BASE_URL",
         "default_base": "https://api.openai.com/v1",
         "default_model": "gpt-4o-mini",
+        "models": ["gpt-4o", "gpt-4o-mini", "o3-mini"],
+        "key_hint": "任意 OpenAI 兼容服务的 Key",
     },
 }
+
+# 已配置供应商时的默认优先级（DeepSeek 放前面：本机环境常用）
+DEFAULT_ORDER = ["deepseek", "anthropic", "deepseek_anthropic", "openai"]
 
 _CFG_KEY = "llm:config"
 
@@ -63,49 +98,85 @@ def _save(cfg: dict) -> None:
                      (_CFG_KEY, json.dumps(cfg)))
 
 
+def _group_members(provider: str) -> list[str]:
+    """同一供应商的不同协议端点共享 Key（如 deepseek / deepseek_anthropic）。"""
+    group = PROVIDERS[provider].get("key_group")
+    if not group:
+        return [provider]
+    return [pid for pid, spec in PROVIDERS.items() if spec.get("key_group") == group]
+
+
 def get_provider_config(provider: str) -> dict:
-    """返回实际可用的配置（含明文 key）。仅内部调用，绝不外发。"""
+    """返回实际可用的配置（含明文 key）。仅内部调用，绝不外发。
+
+    Key 查找顺序：本端点环境变量 → 同组其他端点环境变量
+                  → 本端点 UI 存储 → 同组 UI 存储。
+    """
     spec = PROVIDERS[provider]
-    stored = _load().get(provider, {})
+    stored_all = _load()
+    stored = stored_all.get(provider, {})
+    members = _group_members(provider)
 
-    key = os.environ.get(spec["env_key"]) or (
-        os.environ.get(spec["env_key_alt"]) if spec["env_key_alt"] else None)
+    key = _env_key(spec)
+    key_owner = provider if key else None
+    if not key:
+        for pid in members:
+            if pid != provider and _env_key(PROVIDERS[pid]):
+                key, key_owner = _env_key(PROVIDERS[pid]), pid
+                break
     source = "env" if key else None
-    if not key and stored.get("api_key"):
-        key, source = stored["api_key"], "ui"
+    if not key:
+        for pid in members:
+            cand = stored_all.get(pid, {}).get("api_key")
+            if cand:
+                key, source, key_owner = cand, "ui", pid
+                break
 
+    # base_url / model 不跨端点共享（两个端点地址不同）
     base = (os.environ.get(spec["env_base"]) or stored.get("base_url")
             or spec["default_base"])
     model = stored.get("model") or spec["default_model"]
     return {
         "provider": provider,
+        "protocol": spec["protocol"],
         "api_key": key,
+        "key_source_provider": key_owner,
         "base_url": base,
         "model": model,
         "source": source,
     }
 
 
+def _env_key(spec: dict) -> str | None:
+    return os.environ.get(spec["env_key"]) or (
+        os.environ.get(spec["env_key_alt"]) if spec["env_key_alt"] else None)
+
+
 def public_status() -> dict:
     """给前端的脱敏视图。"""
     cfg = _load()
     out = []
-    for pid, spec in PROVIDERS.items():
+    for pid in DEFAULT_ORDER:
+        spec = PROVIDERS[pid]
         real = get_provider_config(pid)
-        env_set = bool(os.environ.get(spec["env_key"]) or
-                       (os.environ.get(spec["env_key_alt"]) if spec["env_key_alt"] else None))
+        env_set = real["source"] == "env"
         stored = cfg.get(pid, {})
         out.append({
             "provider": pid,
             "label": spec["label"],
+            "protocol": spec["protocol"],
             "configured": bool(real["api_key"]),
             "source": real["source"],            # env / ui / None
             "env_locked": env_set,               # 环境变量存在时不可在 UI 覆盖
-            "masked": masked(stored.get("api_key")) if stored.get("api_key") else "",
+            "key_shared_from": (real["key_source_provider"]
+                                if real["key_source_provider"] != pid else None),
+            "masked": masked(real["api_key"]) if real["api_key"] else "",
             "base_url": real["base_url"],
             "model": real["model"],
             "default_base": spec["default_base"],
             "default_model": spec["default_model"],
+            "models": spec.get("models", []),
+            "key_hint": spec.get("key_hint", ""),
         })
     return {"providers": out, "active": get_active_provider()}
 
@@ -144,13 +215,13 @@ def get_active_provider() -> str:
     with db() as conn:
         row = conn.execute("SELECT value FROM setting WHERE key=?",
                            ("llm:active",)).fetchone()
-    if row:
+    if row and row["value"] in PROVIDERS:
         return row["value"]
-    # 未设置时自动挑选第一个已配置的
-    for pid in PROVIDERS:
+    # 未设置时自动挑选第一个已配置的（按偏好顺序）
+    for pid in DEFAULT_ORDER:
         if get_provider_config(pid)["api_key"]:
             return pid
-    return "anthropic"
+    return DEFAULT_ORDER[0]
 
 
 def set_active_provider(provider: str) -> str:

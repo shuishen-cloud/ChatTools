@@ -502,10 +502,15 @@ function renderSettings() {
     : p.configured
       ? `<span class="badge ok">已配置</span>`
       : `<span class="badge off">未配置</span>`;
+  const protoBadge = p.protocol === "anthropic"
+    ? `<span class="badge off">Anthropic 协议</span>`
+    : `<span class="badge off">OpenAI 兼容协议</span>`;
+  const modelOpts = (p.models || []).map((m) => `<option value="${esc(m)}">`).join("");
 
   $("#provider-form").innerHTML = `
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap">
       ${statusBadge}
+      ${protoBadge}
       ${isActive ? '<span class="badge ok">当前使用</span>' : ''}
       ${p.masked ? `<span class="key-hint">已存：${p.masked}</span>` : ""}
     </div>
@@ -521,7 +526,7 @@ function renderSettings() {
       </div>
       <div class="key-hint">${p.env_locked
         ? "检测到环境变量，优先生效；此处修改不会覆盖它。"
-        : "留空表示不修改；保存后只显示尾 4 位。"}</div>
+        : (p.key_hint || "留空表示不修改；保存后只显示尾 4 位。")}</div>
     </div>
 
     <div class="field">
@@ -533,7 +538,9 @@ function renderSettings() {
     <div class="field">
       <label>模型</label>
       <input type="text" id="set-model" value="${esc(p.model)}"
-             placeholder="${esc(p.default_model)}">
+             placeholder="${esc(p.default_model)}" list="model-suggests">
+      <datalist id="model-suggests">${modelOpts}</datalist>
+      ${(p.models || []).length ? `<div class="key-hint">可选：${p.models.map(esc).join(" · ")}</div>` : ""}
     </div>
 
     <div class="test-result" id="test-result" hidden></div>

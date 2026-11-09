@@ -264,29 +264,33 @@ async def api_llm_test(request):
 
 
 async def _probe(cfg: dict) -> dict:
-    """调用一次极小的上游请求验证凭证。不记录请求体。"""
+    """向上游发一个极小的请求验证凭证。不记录、不回显任何密钥。"""
     import httpx
 
     base = cfg["base_url"].rstrip("/")
-    if cfg["provider"] == "anthropic":
+    if cfg["protocol"] == "anthropic":
         url = f"{base}/v1/messages"
         headers = {"x-api-key": cfg["api_key"], "anthropic-version": "2023-06-01"}
         payload = {"model": cfg["model"], "max_tokens": 1,
                    "messages": [{"role": "user", "content": "hi"}]}
     else:
-        url = f"{base}/chat/completions"
+        # OpenAI 兼容：base 已含 /v1 时不再重复拼接
+        url = f"{base}/chat/completions" if base.endswith("/v1") \
+            else f"{base}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {cfg['api_key']}"}
         payload = {"model": cfg["model"], "max_tokens": 1,
                    "messages": [{"role": "user", "content": "hi"}]}
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(url, json=payload, headers=headers)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": "网络不可达", "detail": type(exc).__name__}
     if r.status_code == 200:
-        return {"ok": True, "reason": "连接正常"}
-    hint = {401: "Key 无效或权限不足", 403: "Key 被拒绝",
+        return {"ok": True, "reason": "连接正常", "model": cfg["model"]}
+    hint = {401: "Key 无效或权限不足", 402: "账户余额不足",
+            403: "Key 被拒绝",
             404: "接口路径不存在（检查 base_url）",
+            422: "参数不被接受（检查模型名）",
             429: "额度/频率超限"}.get(r.status_code, "上游返回错误")
     return {"ok": False, "reason": hint, "status": r.status_code}
 

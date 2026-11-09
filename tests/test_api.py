@@ -184,6 +184,10 @@ class ChatToolTest(unittest.TestCase):
     # -------------------------------------------------- API Key 设置（安全重点）
     def test_12_llm_key_never_leaks(self):
         """核心安全断言：任何返回体都不得包含明文 Key。"""
+        import os
+        # 环境变量优先级高于 DB，先清掉以免掩盖 UI 保存的 Key
+        for name in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"):
+            os.environ.pop(name, None)
         SECRET = "sk-ant-SUPERSECRETVALUE-1234"
         r = self.client.put("/api/llm/config", json={
             "provider": "anthropic", "api_key": SECRET,
@@ -251,6 +255,149 @@ class ChatToolTest(unittest.TestCase):
         r = self.client.post("/api/llm/test", json={"provider": "anthropic"})
         self.assertEqual(r.status_code, 400)
         self.assertIn("API Key", r.json()["error"])
+
+    # -------------------------------------------------- DeepSeek 支持
+    def test_17_deepseek_provider_present(self):
+        data = self.client.get("/api/llm/status").json()["data"]
+        ids = [p["provider"] for p in data["providers"]]
+        self.assertIn("deepseek", ids)
+        self.assertIn("deepseek_anthropic", ids)
+        ds = [p for p in data["providers"] if p["provider"] == "deepseek"][0]
+        self.assertEqual(ds["protocol"], "openai")
+        self.assertEqual(ds["default_base"], "https://api.deepseek.com/v1")
+        self.assertEqual(ds["default_model"], "deepseek-chat")
+        self.assertIn("deepseek-reasoner", ds["models"])
+        dsa = [p for p in data["providers"] if p["provider"] == "deepseek_anthropic"][0]
+        self.assertEqual(dsa["protocol"], "anthropic")
+        self.assertEqual(dsa["default_base"], "https://api.deepseek.com/anthropic")
+
+    def test_18_deepseek_env_detected(self):
+        import os
+        os.environ["DEEPSEEK_API_KEY"] = "sk-ds-env-4321"
+        try:
+            data = self.client.get("/api/llm/status").json()["data"]
+            ds = [p for p in data["providers"] if p["provider"] == "deepseek"][0]
+            self.assertTrue(ds["configured"])
+            self.assertEqual(ds["source"], "env")
+            self.assertTrue(ds["env_locked"])
+            # 环境变量优先级：自动成为 active（若此前未设）
+            self.assertIn(data["active"], ("deepseek", "deepseek_anthropic"))
+        finally:
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+
+    def test_19_deepseek_key_save_masked(self):
+        SECRET = "sk-ds-PLAINTEXT-abcdef9876"
+        r = self.client.put("/api/llm/config", json={
+            "provider": "deepseek", "api_key": SECRET, "model": "deepseek-reasoner"})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(SECRET, r.text)
+        data = self.client.get("/api/llm/status")
+        self.assertNotIn(SECRET, data.text)
+        ds = [p for p in data.json()["data"]["providers"] if p["provider"] == "deepseek"][0]
+        self.assertTrue(ds["configured"])
+        self.assertTrue(ds["masked"].endswith("9876"))
+        self.assertEqual(ds["model"], "deepseek-reasoner")
+        self.client.delete("/api/llm/config/deepseek")
+
+    def test_20_probe_protocol_routing(self):
+        """_probe 应按 protocol 选择 URL 与鉴权头，而非按 provider 名硬编码。"""
+        import asyncio
+        from unittest import mock
+
+        from app.routes import _probe
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                return False
+            async def post(self, url, json=None, headers=None):
+                captured["url"] = url
+                captured["headers"] = headers
+                return FakeResp()
+
+        cases = [
+            ("openai", "https://api.deepseek.com/v1", "https://api.deepseek.com/v1/chat/completions",
+             "Authorization"),
+            ("anthropic", "https://api.deepseek.com/anthropic",
+             "https://api.deepseek.com/anthropic/v1/messages", "x-api-key"),
+        ]
+        with mock.patch("httpx.AsyncClient", FakeClient):
+            for proto, base, want_url, want_hdr in cases:
+                cfg = {"protocol": proto, "api_key": "k-test", "base_url": base,
+                       "model": "deepseek-chat", "provider": "deepseek"}
+                out = asyncio.run(_probe(cfg))
+                self.assertTrue(out["ok"])
+                self.assertEqual(captured["url"], want_url, f"{proto} URL 错误")
+                self.assertIn(want_hdr, captured["headers"])
+                self.assertNotIn("k-test", str(out))  # 探测结果不含 Key
+
+    def test_21_openai_base_without_v1(self):
+        """用户填 https://api.deepseek.com（无 /v1）时需自动补全。"""
+        import asyncio
+        from unittest import mock
+        from app.routes import _probe
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 401
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                return False
+            async def post(self, url, json=None, headers=None):
+                captured["url"] = url
+                return FakeResp()
+
+        with mock.patch("httpx.AsyncClient", FakeClient):
+            out = asyncio.run(_probe({"protocol": "openai", "api_key": "k",
+                                      "base_url": "https://api.deepseek.com",
+                                      "model": "deepseek-chat"}))
+        self.assertEqual(captured["url"],
+                         "https://api.deepseek.com/v1/chat/completions")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], 401)
+        self.assertIn("Key", out["reason"])
+
+    def test_22_deepseek_key_group_shared(self):
+        """deepseek 与 deepseek_anthropic 是同一供应商的两种协议，应共享 Key。"""
+        import os
+        for n in ("DEEPSEEK_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            os.environ.pop(n, None)
+        # 1) UI 保存到 deepseek，deepseek_anthropic 也应识别为已配置
+        self.client.put("/api/llm/config", json={
+            "provider": "deepseek", "api_key": "sk-shared-5555"})
+        data = self.client.get("/api/llm/status").json()["data"]
+        dsa = [p for p in data["providers"] if p["provider"] == "deepseek_anthropic"][0]
+        self.assertTrue(dsa["configured"], "同组 Key 应共享")
+        self.assertEqual(dsa["key_shared_from"], "deepseek")
+        # 2) 环境变量组内也能跨端点生效
+        self.client.delete("/api/llm/config/deepseek")
+        os.environ["DEEPSEEK_API_KEY"] = "sk-env-6666"
+        try:
+            data = self.client.get("/api/llm/status").json()["data"]
+            dsa = [p for p in data["providers"] if p["provider"] == "deepseek_anthropic"][0]
+            self.assertTrue(dsa["configured"])
+            self.assertEqual(dsa["source"], "env")
+            self.assertTrue(dsa["env_locked"])
+            # 3) 两个端点 base_url 不同，不应串味
+            ds = [p for p in data["providers"] if p["provider"] == "deepseek"][0]
+            self.assertEqual(ds["base_url"], "https://api.deepseek.com/v1")
+            self.assertEqual(dsa["base_url"], "https://api.deepseek.com/anthropic")
+        finally:
+            os.environ.pop("DEEPSEEK_API_KEY", None)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -15,7 +15,7 @@
 | **分享** | 一键生成只读链接 `/s/<token>`，纯 HTML 页面，未登录可直接看；可撤销 |
 | **导入** | ChatTool 自有 JSON 回流；直接解析 **Pi** 会话导出；宽松解析其他 `{messages:[...]}` 结构 |
 | **移动优先** | 单页无构建、响应式；Termux / 手机浏览器可用 |
-| **API Key 设置** | 右上角 ⚙ 打开设置，支持 Anthropic / OpenAI 兼容；存服务端、只回显尾 4 位；可测连接 |
+| **API Key 设置** | 右上角 ⚙ 打开设置，支持 **DeepSeek** / Anthropic / OpenAI 兼容；存服务端、只回显尾 4 位；可测连接 |
 
 ## API Key 设置
 
@@ -25,6 +25,29 @@
 - **保存** — 留空表示不修改；保存后只回显 `********3456`
 - **测试连接** — 向上游发一个 `max_tokens:1` 的极小请求，只返回成功/错误类别与状态码
 - **设为当前** — 指定默认供应商；**清除** — 删除已存 Key
+
+### 支持的供应商
+
+| 供应商 | 协议 | 默认 Base URL | 默认模型 |
+|---|---|---|---|
+| **DeepSeek** | OpenAI 兼容 | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| **DeepSeek (Anthropic 兼容)** | Anthropic | `https://api.deepseek.com/anthropic` | `deepseek-chat` |
+| Anthropic (Claude) | Anthropic | `https://api.anthropic.com` | `claude-sonnet-4-5` |
+| OpenAI 兼容 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+
+DeepSeek 提供两种接入协议，这里两条都支持（`deepseek-reasoner` 也在模型建议里）。两者**共享同一个 Key**（`key_group` 机制）：在任一端点保存 Key，另一个自动可用；但 `base_url` 与 `model` 不跨界串用。
+
+环境变量对应关系：
+
+```bash
+DEEPSEEK_API_KEY=sk-...              # DeepSeek 两种协议共用
+DEEPSEEK_BASE_URL=...                # 可选，默认官方 /v1
+DEEPSEEK_ANTHROPIC_BASE_URL=...      # 可选，默认官方 /anthropic
+ANTHROPIC_AUTH_TOKEN=...             # 仅 Anthropic 条目用
+OPENAI_API_KEY=...
+```
+
+> 注意：`ANTHROPIC_AUTH_TOKEN` 不会被当成 DeepSeek 的 Key（两者语义不同）。若你想用 DeepSeek 官方接口，请在 ⚙ 设置里填入 `DEEPSEEK_API_KEY` 或设该环境变量。
 
 ### 安全模型（重要）
 

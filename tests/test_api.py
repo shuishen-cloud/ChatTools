@@ -809,5 +809,36 @@ class ChatToolTest(unittest.TestCase):
         self.assertEqual(d["total"], 0)
         self.assertIn("main_branch", d)
 
+    def test_44_hidden_elements_cannot_cover_page(self):
+        """回归：全屏遮罩（画板/弹窗）若类里写了 display:flex，
+        会盖住 hidden 属性，一加载就遮住整个对话界面。"""
+        import re
+        css = self.client.get("/static/style.css").text
+        html = self.client.get("/").text
+
+        # 1) 全局保险必须存在
+        self.assertRegex(css, r"\[hidden\]\s*\{[^}]*display\s*:\s*none",
+                         "缺少 [hidden] 全局规则，display:flex 会覆盖 hidden")
+
+        # 2) 所有全屏遮罩层，初始必须带 hidden 属性
+        for fullscreen in ("boardview",):
+            m = re.search(rf'id="{fullscreen}"[^>]*', html)
+            self.assertIsNotNone(m, f"缺少 #{fullscreen}")
+            self.assertIn("hidden", m.group(0),
+                          f"#{fullscreen} 初始没有 hidden，会遮住对话界面")
+
+        # 3) 对话主体不得带 hidden
+        m = re.search(r'<div class="detail" id="detail"[^>]*>', html)
+        self.assertIsNotNone(m)
+        self.assertNotIn("hidden", m.group(0),
+                         "#detail 不应初始隐藏，否则用户看不到对话界面")
+
+    def test_45_no_css_class_overrides_hidden(self):
+        """凡是在 CSS 里设了 display 的类，若对应元素带 hidden，
+        必须有 [hidden] 规则或依赖全局规则（全局规则存在即通过）。"""
+        import re
+        css = self.client.get("/static/style.css").text
+        self.assertRegex(css, r"\[hidden\]\s*\{[^}]*display\s*:\s*none\s*!important")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

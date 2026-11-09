@@ -10,3 +10,6 @@ python3 -m tests.test_markdown
 echo
 echo "===== 前端 Markdown 渲染器测试 ====="
 node tests/markdown.test.js
+echo
+echo "===== CSS hidden 层叠检查 ====="
+node tests/css_hidden.test.js

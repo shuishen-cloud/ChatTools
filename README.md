@@ -40,6 +40,23 @@
 测试 `test_41~43` 锁住这个契约：会话详情必含 `messages/main_branch/folders`、
 首页 `#detail` 不得带 `hidden`、空会话的历史栏接口也要返回合法结构。
 
+### 另一个坑：`hidden` 被 CSS 的 display 覆盖
+
+HTML 的 `hidden` 属性只是 UA 样式表里的 `display: none`，
+**优先级低于任何类选择器**。所以 `.boardview { display: flex }`
+会直接让 `#boardview hidden` 失效——画板全屏遮罩（`position:fixed; inset:0; z-index:150`）
+从页面一加载就盖住整个对话界面，看到的只有画板。
+
+修法：CSS 顶部加全局兜底，并对全屏层单独声明：
+
+```css
+[hidden] { display: none !important; }
+.boardview[hidden] { display: none; }
+```
+
+`tests/css_hidden.test.js` 扫描所有带 `hidden` 的元素，
+检查其类的 `display` 声明能否被兜底，防止再犯。
+
 ## 对话生成与思考强度
 
 ### 为什么之前「测试正常但不回复」
@@ -180,10 +197,17 @@ CHATTOOL_DATA=/path/to/data python3 -m app
 ## 测试
 
 ```bash
-python3 -m tests.test_api
+bash tests/run_all.sh                 # 全部
+python3 -m tests.test_api             # 46 项 API（含对话/画板/提问/Key 安全）
+python3 -m tests.test_markdown        # 9 项服务端 Markdown
+node tests/markdown.test.js           # 前端 Markdown 渲染器（200 断言）
+node tests/css_hidden.test.js         # CSS hidden 层叠检查
 ```
 
-覆盖：会话 CRUD、多对多文件夹、分支生成与兄弟计数、收藏/标签、级联删除、四种导出、分享链接与撤销、JSON 往返导入、Pi 格式导入、搜索/统计/归档、静态资源。
+覆盖：会话 CRUD、多对多文件夹、分支生成与兄弟计数、收藏/标签、级联删除、
+四种导出、分享链接与撤销、JSON 往返导入、Pi 格式导入、搜索/统计/归档、
+流式生成与分支上下文隔离、思考强度降级、右侧历史树、悬浮提问、
+画板节点/连线/导出、API Key 不泄漏、启动契约与 CSS 层叠回归。
 
 ## 数据模型
 

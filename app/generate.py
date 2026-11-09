@@ -235,12 +235,25 @@ async def api_thread(request):
 
 # ---------------------------------------------------------------- 悬浮提问
 
-async def api_snippet_ask(request):
-    """针对选中的一段文字提问，独立于主对话，不写入消息树。"""
-    import json as _json
+async def api_snippet_ask_global(request):
+    """悬浮提问（不需要任何会话）。
 
+    悬浮窗的意义就是「在任何地方选中文字就能问」，
+    所以不能强制用户先打开/新建一个会话。
+    """
+    body = await read_json(request)
+    return await _do_snippet_ask(body, conv_id=None)
+
+
+async def api_snippet_ask(request):
+    """悬浮提问（带会话上下文时走这个，用于「提问记录」归档）。"""
     conv_id = request.path_params["conv_id"]
     body = await read_json(request)
+    return await _do_snippet_ask(body, conv_id=conv_id)
+
+
+async def _do_snippet_ask(body: dict, conv_id: str | None):
+    """两个端点共用的实现。conv_id 可为空。"""
     source = (body.get("source_text") or "").strip()
     question = (body.get("question") or "").strip()
     if not source or not question:

@@ -112,7 +112,8 @@ CREATE INDEX IF NOT EXISTS idx_bedge_board ON board_edge(board_id);
 -- 悬浮提问：针对某段选中内容的独立问答，不污染主对话
 CREATE TABLE IF NOT EXISTS snippet_qa (
     id          TEXT PRIMARY KEY,
-    conv_id     TEXT NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+    -- conv_id 可为空：悬浮提问不依赖任何会话，只靠引文
+    conv_id     TEXT REFERENCES conversation(id) ON DELETE SET NULL,
     message_id  TEXT REFERENCES message(id) ON DELETE SET NULL,
     source_text TEXT NOT NULL,
     question    TEXT NOT NULL,
@@ -157,6 +158,39 @@ def tx() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _migrate(conn) -> None:
+    """轻量迁移：CREATE TABLE IF NOT EXISTS 不会修改已有表结构。"""
+    # snippet_qa.conv_id 曾经是 NOT NULL，现改为可空（悬浮提问不依赖会话）
+    cols = conn.execute("PRAGMA table_info(snippet_qa)").fetchall()
+    if any(c["name"] == "conv_id" and c["notnull"] for c in cols):
+        conn.executescript("""
+            PRAGMA foreign_keys = OFF;
+            BEGIN;
+            ALTER TABLE snippet_qa RENAME TO snippet_qa_old;
+            CREATE TABLE snippet_qa (
+                id          TEXT PRIMARY KEY,
+                conv_id     TEXT REFERENCES conversation(id) ON DELETE SET NULL,
+                message_id  TEXT REFERENCES message(id) ON DELETE SET NULL,
+                source_text TEXT NOT NULL,
+                question    TEXT NOT NULL,
+                answer      TEXT NOT NULL DEFAULT '',
+                status      TEXT NOT NULL DEFAULT 'pending',
+                meta        TEXT NOT NULL DEFAULT '{}',
+                created_at  TEXT NOT NULL
+            );
+            INSERT INTO snippet_qa (id, conv_id, message_id, source_text, question,
+                                    answer, status, meta, created_at)
+                SELECT id, conv_id, message_id, source_text, question,
+                       answer, status, meta, created_at FROM snippet_qa_old;
+            DROP TABLE snippet_qa_old;
+            CREATE INDEX IF NOT EXISTS idx_sqa_conv ON snippet_qa(conv_id);
+            COMMIT;
+            PRAGMA foreign_keys = ON;
+        """)
+
+
 def init_db() -> None:
     with db() as conn:
+        # 先确保旧表存在，迁移才有的可改
         conn.executescript(SCHEMA)
+        _migrate(conn)

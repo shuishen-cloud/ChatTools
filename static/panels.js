@@ -423,14 +423,20 @@ const AskPanel = (() => {
 
   async function submit() {
     const q = $("#ask-input").value.trim();
-    if (!q || !state.sourceText || state.streaming) return;
-    const conv = state.activeConv;
-    if (!conv) return toast("先打开一个会话");
+    if (state.streaming) return;
+    if (!q) return toast("先输入问题");
+    if (!state.sourceText) return toast("先选中要提问的文字");
 
     const provider = currentProvider?.();
     if (provider && !provider.configured) {
       return toast("该服务商未配置 API Key，请点右上角 ⚙ 设置");
     }
+
+    // 悬浮提问不需要会话：有会话就走带归档的端点，没有就走全局端点
+    const conv = state.activeConv;
+    const endpoint = conv
+      ? `/api/conversations/${conv.id}/ask`
+      : "/api/ask";
 
     state.streaming = true;
     state.lastQuestion = q;
@@ -448,7 +454,7 @@ const AskPanel = (() => {
     const controller = new AbortController();
     state.abort = controller;
     try {
-      const res = await fetch(`/api/conversations/${conv.id}/ask`, {
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -524,6 +530,13 @@ const AskPanel = (() => {
     const panel = ensurePanel();
     panel.classList.add("open");
     state.open = true;
+    if (!state.activeConv) {
+      $("#ask-title").textContent = "提问记录";
+      $("#ask-body").innerHTML = `<p class="hint ask-empty-hint">
+        提问记录按会话归档；当前没有打开任何会话。
+        直接选中文字提问即可，不选会话也能用。</p>`;
+      return;
+    }
     loadHistory().then(renderHome);
   }
 

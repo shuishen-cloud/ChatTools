@@ -16,7 +16,7 @@ from . import folders as F
 from . import settings as S
 from .db import init_db
 from .exporting import content_disposition
-from .generate import api_generate, api_llm_options, api_snippet_ask, api_thread
+from .generate import api_generate, api_llm_options, api_snippet_ask, api_snippet_ask_global, api_thread
 from .utils import err, ok, read_json
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -472,6 +472,7 @@ def create_app() -> Starlette:
         Route("/api/import", api_import, methods=["POST"]),
         Route("/api/conversations/{conv_id}/thread", api_thread, methods=["GET"]),
         Route("/api/conversations/{conv_id}/ask", api_snippet_ask, methods=["POST"]),
+        Route("/api/ask", api_snippet_ask_global, methods=["POST"]),
         Route("/api/conversations/{conv_id}/snippets", api_snippets, methods=["GET"]),
         Route("/api/snippets/{snippet_id}", api_snippet_delete, methods=["DELETE"]),
         Route("/api/boards", api_boards, methods=["GET", "POST"]),

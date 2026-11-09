@@ -955,5 +955,81 @@ class ChatToolTest(unittest.TestCase):
         self.assertIn("/api/conversations", m)
         self.assertIn('method: "POST"', m)
 
+    # -------------------------------------------------- 悬浮提问不依赖会话（核心修复）
+    def test_52_ask_without_any_conversation(self):
+        """悬浮窗提问不应要求先打开会话——这是用户报告的主问题。"""
+        import asyncio
+        from unittest import mock
+
+        async def fake(cfg, messages, model, effort, system):
+            prompt = messages[0]["content"]
+            assert "引文" in prompt
+            yield {"type": "text", "text": "可以"}
+            yield {"type": "text", "text": "回答"}
+            yield {"type": "done", "info": {}}
+
+        self.client.put("/api/llm/config",
+                        json={"provider": "openai", "api_key": "sk-global"})
+        # 注意：完全不创建任何会话
+        with mock.patch("app.llm.stream_completion", fake):
+            r = self.client.post("/api/ask", json={
+                "source_text": "一段被选中的文字",
+                "question": "这是什么意思？",
+                "provider": "openai",
+            })
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("可以", r.text)
+        self.assertIn("回答", r.text)
+        self.client.delete("/api/llm/config/openai")
+
+    def test_53_global_ask_saves_snippet_without_conv(self):
+        """全局提问也要落库（conv_id 为 NULL），不因缺会话而丢。"""
+        import asyncio
+        from unittest import mock
+
+        async def fake(cfg, messages, model, effort, system):
+            yield {"type": "text", "text": "OK"}
+            yield {"type": "done", "info": {}}
+
+        self.client.put("/api/llm/config",
+                        json={"provider": "openai", "api_key": "sk-g2"})
+        with mock.patch("app.llm.stream_completion", fake):
+            self.client.post("/api/ask", json={
+                "source_text": "文字", "question": "问题", "provider": "openai"})
+        # 直接查库确认 conv_id 为空且记录存在
+        from app.db import db
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT conv_id, question, answer FROM snippet_qa"
+                " WHERE question='问题'").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["conv_id"])
+        self.assertEqual(rows[0]["answer"], "OK")
+        self.client.delete("/api/llm/config/openai")
+
+    def test_54_ask_requires_text_and_question(self):
+        r = self.client.post("/api/ask", json={"source_text": "", "question": "q"})
+        self.assertEqual(r.status_code, 400)
+        r2 = self.client.post("/api/ask", json={"source_text": "x", "question": ""})
+        self.assertEqual(r2.status_code, 400)
+
+    def test_55_frontend_ask_not_gated_on_conversation(self):
+        """前端不得因缺少 activeConv 而直接 return。"""
+        js = self.client.get("/static/panels.js").text
+        submit = js[js.index("async function submit()"):]
+        submit = submit[:submit.index("async function loadHistory")]
+        self.assertNotIn('if (!conv) return toast("先打开一个会话")', submit,
+                         "悬浮提问不应强制要求先打开会话")
+        self.assertIn('"/api/ask"', submit, "应回退到全局提问端点")
+
+    def test_56_snippet_qa_conv_id_nullable(self):
+        """schema 迁移：conv_id 必须允许 NULL。"""
+        from app.db import db
+        with db() as conn:
+            cols = {c["name"]: c for c in conn.execute("PRAGMA table_info(snippet_qa)")}
+        self.assertIn("conv_id", cols)
+        self.assertEqual(cols["conv_id"]["notnull"], 0,
+                         "conv_id 不应为 NOT NULL，否则无会话时无法提问")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

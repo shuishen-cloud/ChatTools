@@ -214,8 +214,9 @@ def boards_containing_message(message_id: str) -> list[str]:
 
 # ---------------------------------------------------------------- 悬浮提问
 
-def create_snippet(conv_id: str, message_id: str | None, source_text: str,
+def create_snippet(conv_id: str | None, message_id: str | None, source_text: str,
                    question: str) -> dict:
+    """conv_id 可为 None：悬浮提问不依赖会话。"""
     sid = new_id("q_")
     with tx() as conn:
         conn.execute(

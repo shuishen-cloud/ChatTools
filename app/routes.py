@@ -12,6 +12,7 @@ from starlette.staticfiles import StaticFiles
 from . import conversations as C
 from . import exporting as E
 from . import folders as F
+from . import settings as S
 from .db import init_db
 from .exporting import content_disposition
 from .utils import err, ok, read_json
@@ -217,6 +218,79 @@ async def api_import(request):
         return err(f"导入失败：{exc}")
 
 
+async def api_llm_status(request):
+    return ok(S.public_status())
+
+
+async def api_llm_save(request):
+    body = await read_json(request)
+    provider = body.get("provider") or ""
+    try:
+        status = S.save_provider(provider, body.get("api_key"),
+                                 body.get("base_url"), body.get("model"),
+                                 clear_key=bool(body.get("clear_key")))
+    except ValueError as exc:
+        return err(str(exc))
+    return ok(status)
+
+
+async def api_llm_clear(request):
+    provider = request.path_params["provider"]
+    try:
+        return ok(S.clear_provider(provider))
+    except ValueError as exc:
+        return err(str(exc))
+
+
+async def api_llm_active(request):
+    body = await read_json(request)
+    try:
+        return ok({"active": S.set_active_provider(body.get("provider") or "")})
+    except ValueError as exc:
+        return err(str(exc))
+
+
+async def api_llm_test(request):
+    """轻量连通性检查。只返回成功/错误类别，绝不回显 Key。"""
+    body = await read_json(request)
+    provider = body.get("provider") or S.get_active_provider()
+    if provider not in S.PROVIDERS:
+        return err("未知供应商")
+    cfg = S.get_provider_config(provider)
+    if not cfg["api_key"]:
+        return err("尚未配置 API Key")
+    result = await _probe(cfg)
+    return ok(result)
+
+
+async def _probe(cfg: dict) -> dict:
+    """调用一次极小的上游请求验证凭证。不记录请求体。"""
+    import httpx
+
+    base = cfg["base_url"].rstrip("/")
+    if cfg["provider"] == "anthropic":
+        url = f"{base}/v1/messages"
+        headers = {"x-api-key": cfg["api_key"], "anthropic-version": "2023-06-01"}
+        payload = {"model": cfg["model"], "max_tokens": 1,
+                   "messages": [{"role": "user", "content": "hi"}]}
+    else:
+        url = f"{base}/chat/completions"
+        headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+        payload = {"model": cfg["model"], "max_tokens": 1,
+                   "messages": [{"role": "user", "content": "hi"}]}
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            r = await client.post(url, json=payload, headers=headers)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": "网络不可达", "detail": type(exc).__name__}
+    if r.status_code == 200:
+        return {"ok": True, "reason": "连接正常"}
+    hint = {401: "Key 无效或权限不足", 403: "Key 被拒绝",
+            404: "接口路径不存在（检查 base_url）",
+            429: "额度/频率超限"}.get(r.status_code, "上游返回错误")
+    return {"ok": False, "reason": hint, "status": r.status_code}
+
+
 async def api_stats(request):
     from .db import db
     with db() as conn:
@@ -244,6 +318,11 @@ def create_app() -> Starlette:
         Route("/", index),
         Route("/s/{token}", share_page),
         Route("/api/stats", api_stats),
+        Route("/api/llm/status", api_llm_status, methods=["GET"]),
+        Route("/api/llm/config", api_llm_save, methods=["PUT"]),
+        Route("/api/llm/config/{provider}", api_llm_clear, methods=["DELETE"]),
+        Route("/api/llm/active", api_llm_active, methods=["PUT"]),
+        Route("/api/llm/test", api_llm_test, methods=["POST"]),
         Route("/api/conversations", api_conversations, methods=["GET"]),
         Route("/api/conversations", api_conv_create, methods=["POST"]),
         Route("/api/conversations/{conv_id}", api_conv_get, methods=["GET"]),

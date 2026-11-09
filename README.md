@@ -15,6 +15,25 @@
 | **分享** | 一键生成只读链接 `/s/<token>`，纯 HTML 页面，未登录可直接看；可撤销 |
 | **导入** | ChatTool 自有 JSON 回流；直接解析 **Pi** 会话导出；宽松解析其他 `{messages:[...]}` 结构 |
 | **移动优先** | 单页无构建、响应式；Termux / 手机浏览器可用 |
+| **API Key 设置** | 右上角 ⚙ 打开设置，支持 Anthropic / OpenAI 兼容；存服务端、只回显尾 4 位；可测连接 |
+
+## API Key 设置
+
+点右上角 **⚙** 打开设置窗口：
+
+- 切换供应商（Anthropic / OpenAI 兼容），填 **API Key / Base URL / 模型**
+- **保存** — 留空表示不修改；保存后只回显 `********3456`
+- **测试连接** — 向上游发一个 `max_tokens:1` 的极小请求，只返回成功/错误类别与状态码
+- **设为当前** — 指定默认供应商；**清除** — 删除已存 Key
+
+### 安全模型（重要）
+
+1. **Key 永不返回前端**：`/api/llm/status` 只给 `configured`、`source`、`masked`（尾 4 位）。有测试 `test_12_llm_key_never_leaks` 逐接口断言返回体不含明文。
+2. **Key 不进 Git**：存在 `data/chattool.db`，而 `data/` 在 `.gitignore` 里。
+3. **环境变量优先**：检测到 `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY` 时标记 `env_locked`，UI 修改不会覆盖部署环境。
+4. **空值语义清晰**：不提交 `api_key` 字段 = 不改动；提交空串或 `clear_key:true` = 清除。
+
+> ⚠️ **若你打算用 `--host 0.0.0.0` 让手机访问**：当前没有任何登录鉴权，局域网内任何人都能打开设置页使用你的 Key。务必只在本机/localhost 使用，或先加访问控制。
 
 ## 运行
 
@@ -107,6 +126,13 @@ PATCH  /api/folders/{id}       DELETE /api/folders/{id}
 POST   /api/import  {payload, format?: "pi", folder_ids?: []}
 GET    /api/stats
 GET    /s/{token}                                  公开只读分享页
+
+# LLM 设置（Key 从不外发）
+GET    /api/llm/status                             脱敏状态
+PUT    /api/llm/config  {provider, api_key?, base_url?, model?, clear_key?}
+DELETE /api/llm/config/{provider}                  清除 Key
+PUT    /api/llm/active  {provider}                 设为当前
+POST   /api/llm/test    {provider?}                连接测试
 ```
 
 ## 目录结构
@@ -117,6 +143,7 @@ app/
   utils.py         ID / 时间 / JSON 响应
   conversations.py 会话与消息树（分支、收藏、兄弟节点）
   folders.py       文件夹多对多、标签
+  settings.py      LLM 供应商 / API Key 脱敏存取
   exporting.py     导出 / 分享 / 导入（含 Pi 解析）
   routes.py        Starlette 路由
   main.py          入口

@@ -470,6 +470,136 @@ function switchView(name) {
   if (name === "folders") loadFolders();
 }
 
+/* ---------------------------------------------------------------- 设置：API Key */
+const settingsState = { status: null, current: "anthropic" };
+
+async function openSettings() {
+  settingsState.status = await api("/api/llm/status");
+  const active = settingsState.status.active;
+  settingsState.current = settingsState.status.providers.some((p) => p.provider === active)
+    ? active : settingsState.status.providers[0].provider;
+  renderSettings();
+  $("#modal-settings").hidden = false;
+}
+
+function renderSettings() {
+  const { providers } = settingsState.status;
+  $("#provider-tabs").innerHTML = providers.map((p) => `
+    <button data-p="${p.provider}" class="${p.provider === settingsState.current ? "active" : ""}">
+      ${esc(p.label)}${p.configured ? ' <span style="color:var(--green)">•</span>' : ""}
+    </button>`).join("");
+  $("#provider-tabs").onclick = (e) => {
+    const b = e.target.closest("button[data-p]");
+    if (!b) return;
+    settingsState.current = b.dataset.p;
+    renderSettings();
+  };
+
+  const p = providers.find((x) => x.provider === settingsState.current);
+  const isActive = settingsState.status.active === p.provider;
+  const statusBadge = p.env_locked
+    ? `<span class="badge warn">已由环境变量提供</span>`
+    : p.configured
+      ? `<span class="badge ok">已配置</span>`
+      : `<span class="badge off">未配置</span>`;
+
+  $("#provider-form").innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+      ${statusBadge}
+      ${isActive ? '<span class="badge ok">当前使用</span>' : ''}
+      ${p.masked ? `<span class="key-hint">已存：${p.masked}</span>` : ""}
+    </div>
+
+    <div class="field">
+      <label>API Key</label>
+      <div class="key-row">
+        <input type="password" id="set-key" autocomplete="off" spellcheck="false"
+               placeholder="${p.env_locked ? "由环境变量提供，无需填写" : "sk-..."}"
+               ${p.env_locked ? "disabled" : ""}>
+        <button class="btn ghost" id="btn-toggle-key" type="button"
+                ${p.env_locked ? "disabled" : ""}>显示</button>
+      </div>
+      <div class="key-hint">${p.env_locked
+        ? "检测到环境变量，优先生效；此处修改不会覆盖它。"
+        : "留空表示不修改；保存后只显示尾 4 位。"}</div>
+    </div>
+
+    <div class="field">
+      <label>Base URL</label>
+      <input type="text" id="set-base" value="${esc(p.base_url)}"
+             placeholder="${esc(p.default_base)}">
+    </div>
+
+    <div class="field">
+      <label>模型</label>
+      <input type="text" id="set-model" value="${esc(p.model)}"
+             placeholder="${esc(p.default_model)}">
+    </div>
+
+    <div class="test-result" id="test-result" hidden></div>
+
+    <div class="modal-foot" style="flex-wrap:wrap;justify-content:flex-start">
+      <button class="btn primary" id="btn-save-key">保存</button>
+      <button class="btn ghost" id="btn-test-key">测试连接</button>
+      <button class="btn ghost" id="btn-use-provider" ${isActive ? "disabled" : ""}>
+        ${isActive ? "已是当前" : "设为当前"}</button>
+      ${p.masked ? '<button class="btn danger ghost" id="btn-clear-key">清除</button>' : ""}
+    </div>`;
+
+  $("#btn-toggle-key").onclick = () => {
+    const inp = $("#set-key");
+    inp.type = inp.type === "password" ? "text" : "password";
+    $("#btn-toggle-key").textContent = inp.type === "password" ? "显示" : "隐藏";
+  };
+  $("#btn-save-key").onclick = saveKey;
+  $("#btn-test-key").onclick = testKey;
+  $("#btn-use-provider").onclick = async () => {
+    await api("/api/llm/active", { method: "PUT", body: { provider: p.provider } });
+    toast("已切换当前供应商");
+    await openSettings();
+  };
+  const clearBtn = $("#btn-clear-key");
+  if (clearBtn) clearBtn.onclick = async () => {
+    if (!confirm(`清除 ${p.label} 的 API Key？`)) return;
+    await api(`/api/llm/config/${p.provider}`, { method: "DELETE" });
+    toast("已清除");
+    await openSettings();
+  };
+}
+
+async function saveKey() {
+  const p = settingsState.current;
+  const keyVal = $("#set-key").value.trim();
+  const body = {
+    provider: p,
+    base_url: $("#set-base").value.trim(),
+    model: $("#set-model").value.trim(),
+  };
+  // 只有填了新 Key 才提交，避免把掩码占位符当真 Key 存回去
+  if (keyVal) body.api_key = keyVal;
+  settingsState.status = await api("/api/llm/config", { method: "PUT", body });
+  toast(keyVal ? "已保存" : "设置已更新");
+  renderSettings();
+}
+
+async function testKey() {
+  const box = $("#test-result");
+  box.hidden = false;
+  box.className = "test-result";
+  box.textContent = "正在测试…";
+  try {
+    const r = await api("/api/llm/test", {
+      method: "POST", body: { provider: settingsState.current },
+    });
+    box.className = "test-result " + (r.ok ? "ok" : "bad");
+    box.textContent = r.ok ? "✓ " + r.reason
+      : `✗ ${r.reason}${r.status ? ` (HTTP ${r.status})` : ""}${r.detail ? ` · ${r.detail}` : ""}`;
+  } catch (e) {
+    box.className = "test-result bad";
+    box.textContent = "✗ " + e.message;
+  }
+}
+
 /* ---------------------------------------------------------------- 事件绑定 */
 function bind() {
   $("#btn-menu").onclick = () => $("#sidebar").classList.toggle("open");
@@ -540,6 +670,7 @@ function bind() {
 
   $("#btn-import").onclick = () => ($("#modal-import").hidden = false);
   $("#btn-do-import").onclick = doImport;
+  $("#btn-settings").onclick = openSettings;
 
   $$("[data-close]").forEach((b) => (b.onclick = () => (b.closest(".modal").hidden = true)));
   $$(".modal").forEach((m) => (m.onclick = (e) => { if (e.target === m) m.hidden = true; }));

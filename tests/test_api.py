@@ -181,5 +181,76 @@ class ChatToolTest(unittest.TestCase):
         self.assertEqual(self.client.get("/static/style.css").status_code, 200)
 
 
+    # -------------------------------------------------- API Key 设置（安全重点）
+    def test_12_llm_key_never_leaks(self):
+        """核心安全断言：任何返回体都不得包含明文 Key。"""
+        SECRET = "sk-ant-SUPERSECRETVALUE-1234"
+        r = self.client.put("/api/llm/config", json={
+            "provider": "anthropic", "api_key": SECRET,
+            "base_url": "https://api.anthropic.com", "model": "claude-sonnet-4-5",
+        })
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(SECRET, r.text)            # 保存响应不回显
+        status = self.client.get("/api/llm/status")
+        self.assertNotIn(SECRET, status.text)       # 状态接口脱敏
+        data = status.json()["data"]
+        ant = [p for p in data["providers"] if p["provider"] == "anthropic"][0]
+        self.assertTrue(ant["configured"])
+        self.assertTrue(ant["masked"].endswith("1234"))
+        self.assertNotIn("SUPERSECRET", ant["masked"])
+        # 测试连接接口也不得回显
+        t = self.client.post("/api/llm/test", json={"provider": "anthropic"})
+        self.assertNotIn(SECRET, t.text)
+
+    def test_13_llm_env_wins_over_db(self):
+        import os
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = "env-token-9999"
+        try:
+            data = self.client.get("/api/llm/status").json()["data"]
+            ant = [p for p in data["providers"] if p["provider"] == "anthropic"][0]
+            self.assertEqual(ant["source"], "env")
+            self.assertTrue(ant["env_locked"])
+        finally:
+            os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+
+    def test_14_llm_clear_and_blank_means_noop(self):
+        # 前端的「留空 = 不修改」：根本不会提交 api_key 字段
+        self.client.put("/api/llm/config", json={"provider": "openai", "api_key": "sk-openai-7777"})
+        self.client.put("/api/llm/config", json={"provider": "openai", "model": "gpt-4o"})
+        data = self.client.get("/api/llm/status").json()["data"]
+        oa = [p for p in data["providers"] if p["provider"] == "openai"][0]
+        self.assertTrue(oa["configured"], "未提交 api_key 时不应清除已有 Key")
+        self.assertEqual(oa["model"], "gpt-4o")
+        # 显式提交空字符串 = 清除
+        self.client.put("/api/llm/config", json={"provider": "openai", "api_key": ""})
+        data = self.client.get("/api/llm/status").json()["data"]
+        oa = [p for p in data["providers"] if p["provider"] == "openai"][0]
+        self.assertFalse(oa["configured"])
+        # clear_key 标记也可清除
+        self.client.put("/api/llm/config", json={"provider": "openai", "api_key": "sk-x-1"})
+        self.client.put("/api/llm/config", json={"provider": "openai", "clear_key": True})
+        data = self.client.get("/api/llm/status").json()["data"]
+        self.assertFalse([p for p in data["providers"]
+                          if p["provider"] == "openai"][0]["configured"])
+        # DELETE 路由清除
+        self.client.put("/api/llm/config", json={"provider": "openai", "api_key": "sk-y-2"})
+        self.client.delete("/api/llm/config/openai")
+        data = self.client.get("/api/llm/status").json()["data"]
+        self.assertFalse([p for p in data["providers"]
+                          if p["provider"] == "openai"][0]["configured"])
+
+    def test_15_llm_unknown_provider(self):
+        self.assertEqual(self.client.put("/api/llm/config",
+                                         json={"provider": "nope", "api_key": "x"}).status_code, 400)
+        self.assertEqual(self.client.put("/api/llm/active",
+                                         json={"provider": "nope"}).status_code, 400)
+
+    def test_16_settings_endpoints_require_key(self):
+        """未配置 Key 时测试接口应明确报错而非崩溃。"""
+        self.client.delete("/api/llm/config/anthropic")
+        r = self.client.post("/api/llm/test", json={"provider": "anthropic"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("API Key", r.json()["error"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

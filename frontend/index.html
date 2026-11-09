@@ -15,6 +15,8 @@
     <input id="global-search" class="search" placeholder="搜索会话 / 消息…" autocomplete="off">
     <button class="btn ghost" id="btn-import">导入</button>
     <button class="btn primary" id="btn-new">＋ 新会话</button>
+    <button class="icon-btn" id="btn-settings" title="设置" aria-label="设置"
+            style="display:block">⚙</button>
   </header>
 
   <div class="layout">
@@ -132,6 +134,19 @@
     <div class="modal-foot">
       <button class="btn ghost" data-close>关闭</button>
       <button class="btn primary" id="btn-do-import">导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置：API Key -->
+<div class="modal" id="modal-settings" hidden>
+  <div class="modal-box">
+    <h3>设置</h3>
+    <p class="hint">Key 仅保存在本机服务端数据库，不会回传到浏览器，也不会写入 Git。</p>
+    <div class="provider-switch" id="provider-tabs"></div>
+    <div id="provider-form"></div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close>关闭</button>
     </div>
   </div>
 </div>

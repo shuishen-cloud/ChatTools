@@ -15,6 +15,7 @@
     <input id="global-search" class="search" placeholder="搜索会话 / 消息…" autocomplete="off">
     <button class="btn ghost" id="btn-import">导入</button>
     <button class="btn primary" id="btn-new">＋ 新会话</button>
+    <button class="btn ghost" id="btn-board" title="画板">画板</button>
     <button class="icon-btn" id="btn-settings" title="设置" aria-label="设置"
             style="display:block">⚙</button>
   </header>
@@ -66,6 +67,7 @@
           </div>
           <div class="actions">
             <button class="btn ghost" id="btn-archive">归档</button>
+            <button class="btn ghost" id="btn-snippets">提问记录</button>
             <button class="btn ghost" id="btn-share">分享</button>
             <div class="dropdown">
               <button class="btn ghost" id="btn-export">导出 ▾</button>
@@ -107,6 +109,43 @@
         </div>
       </div>
     </main>
+
+    <!-- 右侧：历史快速切换 -->
+    <aside class="threadbar" id="threadbar">
+      <div class="thread-head">
+        <span>对话历史</span>
+        <span class="thread-count" id="thread-count"></span>
+        <button class="mini" id="btn-thread-toggle" title="收起/展开">⟨</button>
+      </div>
+      <div class="thread-body" id="thread-tree"></div>
+    </aside>
+  </div>
+</div>
+
+<!-- 悬浮提问浮层 -->
+<div class="ask-bubble" id="ask-bubble" hidden>
+  <button data-act="ask-selection">💬 就此提问</button>
+</div>
+
+<!-- 画板视图（全屏遮罩） -->
+<div class="boardview" id="boardview" hidden>
+  <div class="board-top">
+    <select id="board-select"></select>
+    <button class="btn ghost" id="btn-board-new">＋ 新建</button>
+    <input id="board-name" class="board-name" placeholder="画板名称">
+    <span class="board-hint" id="board-hint"></span>
+    <button class="btn ghost" id="btn-board-link">连线模式</button>
+    <button class="btn ghost" id="btn-board-export">导出</button>
+    <button class="btn ghost" id="btn-board-close">关闭</button>
+  </div>
+  <div class="board-canvas" id="board-canvas">
+    <svg class="board-svg" id="board-svg"></svg>
+    <div class="board-nodes" id="board-nodes"></div>
+    <div class="board-empty" id="board-empty">
+      <p>画板是空的。</p>
+      <p class="hint">在任意消息底部点「＋ 加入画板」，即可把内容搬到这块画布上，
+      然后用「连线模式」写出它们之间的关系。</p>
+    </div>
   </div>
 </div>
 
@@ -162,6 +201,7 @@
 
 <div id="toast" class="toast" hidden></div>
 <script src="/static/markdown.js"></script>
+<script src="/static/panels.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

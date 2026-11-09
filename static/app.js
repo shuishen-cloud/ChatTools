@@ -179,12 +179,16 @@ const randColor = () => `hsl(${Math.floor(Math.random() * 360)} 62% 60%)`;
 async function openConv(id) {
   state.activeConv = await api(`/api/conversations/${id}`);
   state.editingMsgId = null;
+  state.showAllBranches = false;
   $("#empty-state").hidden = true;
   $("#detail").hidden = false;
   $("#conv-title").textContent = state.activeConv.title;
   renderConvFolders();
   renderMessages();
   renderConvs();
+  // 右侧历史栏
+  await ThreadView.load(id).catch(() => {});
+  AskPanel.reset(id);
   if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
 }
 
@@ -258,6 +262,8 @@ function renderMessages() {
           <button class="tool-btn" data-act="edit" data-id="${m.id}">✎ 编辑分支</button>
           <button class="tool-btn" data-act="tag" data-id="${m.id}"># 标签</button>
           <button class="tool-btn" data-act="branch" data-id="${m.id}">⌥ 查看分支</button>
+          <button class="tool-btn" data-act="ask" data-id="${m.id}">💬 提问</button>
+          <button class="tool-btn" data-act="board" data-id="${m.id}">＋ 画板</button>
           ${m.role === "user" ? `<button class="tool-btn" data-act="regen" data-id="${m.id}">↻ 重新生成</button>` : ""}
           <button class="tool-btn" data-act="del" data-id="${m.id}">🗑</button>
         </div>`}
@@ -281,6 +287,12 @@ function renderBranchBar(msgs, main) {
     state.showAllBranches = !state.showAllBranches;
     renderMessages();
   };
+}
+
+/** 供右侧历史栏跳转到旁支时调用：强制展开全部分支 */
+function revealAllBranches() {
+  state.showAllBranches = true;
+  renderMessages();
 }
 
 const roleName = (r) => ({ user: "👤 用户", assistant: "🤖 助手", system: "⚙️ 系统", tool: "🔧 工具" }[r] || r);
@@ -935,6 +947,20 @@ function bind() {
     if (act === "save-edit") return saveBranchEdit(id);
     if (act === "tag") return addTag(id);
     if (act === "branch") return showBranches(id);
+    if (act === "ask") {
+      // 没选中文本时，用整条消息作为引文
+      const msg = state.activeConv.messages.find((x) => x.id === id);
+      if (!msg) return;
+      document.querySelector(`#ask-bubble`)?.setAttribute("hidden", "");
+      const bubble = document.querySelector("#ask-bubble");
+      if (bubble) bubble.dataset.msgId = id;
+      AskPanel.openWith((msg.content || "").slice(0, 4000));
+      return;
+    }
+    if (act === "board") {
+      await Board.addMessage(id, state.activeConv.id);
+      return;
+    }
     if (act === "regen") {
       await generateReply({ fromId: id });
       return;
@@ -970,6 +996,33 @@ function bind() {
   $("#btn-import").onclick = () => ($("#modal-import").hidden = false);
   $("#btn-do-import").onclick = doImport;
   $("#btn-settings").onclick = openSettings;
+
+  /* ---- 右侧历史栏 ---- */
+  const threadbar = $("#threadbar");
+  if (window.innerWidth <= 760) threadbar.classList.add("collapsed");
+  $("#btn-thread-toggle").onclick = () => {
+    threadbar.classList.toggle("collapsed");
+    $("#btn-thread-toggle").textContent = threadbar.classList.contains("collapsed") ? "⟨" : "⟩";
+  };
+  // 滚动联动高亮（节流）
+  let scrollTick = false;
+  $("#main").addEventListener("scroll", () => {
+    if (scrollTick) return;
+    scrollTick = true;
+    requestAnimationFrame(() => {
+      scrollTick = false;
+      ThreadView.setActiveFromScroll();
+    });
+  }, { passive: true });
+
+  /* ---- 悬浮提问 ---- */
+  AskPanel.bindSelection();
+  $("#btn-snippets").onclick = () => AskPanel.openHistory();
+
+  /* ---- 画板 ---- */
+  Board.bind();
+  // 预加载画板列表，以便消息底部按钮直接使用
+  Board.loadBoards().catch(() => {});
 
   $$("[data-close]").forEach((b) => (b.onclick = () => (b.closest(".modal").hidden = true)));
   $$(".modal").forEach((m) => (m.onclick = (e) => { if (e.target === m) m.hidden = true; }));

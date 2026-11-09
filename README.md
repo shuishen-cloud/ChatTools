@@ -20,6 +20,9 @@
 | **服务商 / 模型 / 思考强度切换** | 聊天框底部三个下拉：服务商、模型、思考档位（关/低/中/高），选择本地记忆 |
 | **推理过程可见** | 支持推理的模型会流式显示「思考过程」，与正文分开保存 |
 | **分支感知上下文** | 生成时只把当前分支的祖先链发给模型，兄弟分支互不污染 |
+| **右侧历史快速切换** | 右栏把消息树渲染成脉络，与滚动双向联动，可折叠分支、一键跳转 |
+| **悬浮提问** | 选中任何文字即浮现「💬 就此提问」，回答进侧边抽屉，不污染主对话 |
+| **提示词画板** | 把任意会话的消息「＋ 画板」，在画布上拖拽布局、连线写出关系，可导出 Markdown |
 
 ## 对话生成与思考强度
 
@@ -59,6 +62,47 @@
 
 - 在分支 A 继续对话，模型看不到分支 B 的内容；
 - 「重新生成」按钮针对被点击的那条 user 消息重开一条兄弟分支，旧回答保留。
+
+## 右侧历史 / 悬浮提问 / 画板
+
+### 右侧历史快速切换
+
+右栏 `ThreadView` 把消息树渲染为可折叠脉络：
+
+- 分支点显示 `🔀 N`，旁支消息淡化显示
+- 点击任一项平滑滚动到对应消息并短暂高亮
+- **双向联动**：滚动正文时，历史栏自动高亮当前消息并把它滚进可视区
+- 点击箭头只折叠，不跳转；点正文才跳转
+- 手机上是抽屉（默认收起），桌面可收起成窄条
+
+接口：`GET /api/conversations/{id}/thread` → 递归树 + `main_branch`。
+
+### 悬浮提问
+
+在消息里**选中任意文字** → 浮出「💬 就此提问」→ 侧边抽屉流式回答。
+
+- 回答存入 `snippet_qa` 表，**不写入消息树**，所以不会弄乱对话主线
+- 顶部「提问记录」可回看该会话的所有悬浮问答
+- 没选中文本时，消息底部的「💬 提问」按钮会用整条消息当引文
+- 提问走独立 system prompt（不复述引文、信息不足时明确指出）
+
+### 提示词画板
+
+消息底部「＋ 画板」→ 把内容搬上画布。
+
+| 操作 | 方式 |
+|---|---|
+| 移动节点 | 直接拖拽（松开后保存坐标） |
+| 写备注 | 点击节点顶部标题区直接输 |
+| 颜色区分 | 节点工具里的「颜色」循环切换 |
+| 连线写关系 | 「连线模式」→ 点起点 → 点终点 → 输入关系词 |
+| 改/删连线 | 点击连线本身，留空即删除 |
+| 导出 | 顶栏「导出」，输出节点 + `A -->|关系| B` 列表 |
+
+数据模型：一条消息可被**多个画板**引用；消息删除后节点保留并标记失效（`missing`），
+不会因为清理会话而丢掉你画好的结构。
+
+接口：`/api/boards`、`/api/boards/{id}/nodes`、`/api/boards/{id}/edges`。
 
 ## API Key 设置
 
@@ -193,6 +237,20 @@ GET    /api/folders[?tree=1]   POST /api/folders
 PATCH  /api/folders/{id}       DELETE /api/folders/{id}
 
 POST   /api/import  {payload, format?: "pi", folder_ids?: []}
+GET    /api/conversations/{id}/thread              消息树（右侧历史栏）
+POST   /api/conversations/{id}/ask                 悬浮提问（SSE）
+GET    /api/conversations/{id}/snippets            提问记录
+DELETE /api/snippets/{id}
+
+# 画板
+GET|POST /api/boards                              列表 / 新建
+GET|PATCH|DELETE /api/boards/{id}
+GET    /api/boards/{id}/export                    导出 Markdown
+POST   /api/boards/{id}/nodes                     加入消息作为节点
+POST   /api/boards/{id}/edges                     连线 {from_node,to_node,label,style}
+PATCH|DELETE /api/board-nodes/{id}                移动/备注/颜色/移除
+PATCH|DELETE /api/board-edges/{id}                改关系名/删除
+
 GET    /api/stats
 GET    /s/{token}                                  公开只读分享页
 
@@ -214,11 +272,13 @@ app/
   folders.py       文件夹多对多、标签
   settings.py      LLM 供应商 / API Key 脱敏存取
   llm.py           上游调用、协议适配、思考强度映射与降级
-  generate.py      分支上下文构建、SSE 流式生成、自动命名
+  generate.py      分支上下文构建、SSE 流式生成、自动命名、历史树、悬浮提问
+  boards.py        画板节点/连线、悬浮提问记录
+  markdown.py      服务端 Markdown 渲染（分享页 / HTML 导出）
   exporting.py     导出 / 分享 / 导入（含 Pi 解析）
   routes.py        Starlette 路由
   main.py          入口
 frontend/index.html
-static/style.css  static/app.js  static/markdown.js
+static/style.css  static/app.js  static/markdown.js  static/panels.js
 tests/test_api.py  tests/test_markdown.py  tests/markdown.test.js
 ```

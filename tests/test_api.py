@@ -555,5 +555,217 @@ class ChatToolTest(unittest.TestCase):
         self.assertEqual(ev, [{"type": "thinking", "text": "推"},
                               {"type": "text", "text": "答"}])
 
+    # -------------------------------------------------- 右侧历史树
+    def test_30_thread_tree(self):
+        conv = self._post("/api/conversations", {"title": "历史树"})
+        cid = conv["id"]
+        u = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "user", "content": "第一条问题"})
+        a = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "assistant", "content": "第一个回答", "parent_id": u["id"]})
+        # 造一个分支
+        self._post(f"/api/messages/{a['id']}/branch", {"content": "分支回答"})
+        data = self.client.get(f"/api/conversations/{cid}/thread").json()["data"]
+        self.assertEqual(data["total"], 3)
+        self.assertEqual(len(data["roots"]), 1)
+        root = data["roots"][0]
+        self.assertEqual(root["preview"], "第一条问题")
+        # u 下面有两个子节点：回答 a 与 a 的分支（branch_edit 建在 u 下）
+        self.assertEqual(len(root["children"]), 2)
+        self.assertEqual(root["branch_count"], 2)
+        self.assertIn("main_branch", data)
+        self.assertEqual(len(data["main_branch"]), 2)   # 主线只含 2 条
+
+    def test_31_thread_preview_truncated(self):
+        conv = self._post("/api/conversations", {"title": "长文本"})
+        long_text = "很长" * 100
+        self._post(f"/api/conversations/{conv['id']}/messages",
+                   {"role": "user", "content": long_text})
+        data = self.client.get(f"/api/conversations/{conv['id']}/thread").json()["data"]
+        preview = data["roots"][0]["preview"]
+        self.assertLessEqual(len(preview), 61)
+        self.assertTrue(preview.endswith("…"))
+
+    # -------------------------------------------------- 画板
+    def test_32_board_crud(self):
+        board = self._post("/api/boards", {"name": "研究脉络"})
+        self.assertTrue(board["id"].startswith("b_"))
+        boards = self.client.get("/api/boards").json()["data"]
+        self.assertIn(board["id"], [b["id"] for b in boards])
+        # 改名
+        r = self.client.patch(f"/api/boards/{board['id']}", json={"name": "改名后"})
+        self.assertEqual(r.json()["data"]["name"], "改名后")
+
+    def test_33_board_nodes_and_edges(self):
+        board = self._post("/api/boards", {"name": "连线"})
+        bid = board["id"]
+        conv = self._post("/api/conversations", {"title": "来源"})
+        m1 = self._post(f"/api/conversations/{conv['id']}/messages",
+                        {"role": "user", "content": "节点一"})
+        m2 = self._post(f"/api/conversations/{conv['id']}/messages",
+                        {"role": "assistant", "content": "节点二"})
+        n1 = self._post(f"/api/boards/{bid}/nodes", {"message_id": m1["id"]})
+        n2 = self._post(f"/api/boards/{bid}/nodes", {"message_id": m2["id"]})
+        # 不同节点应自动错开坐标
+        self.assertNotEqual((n1["x"], n1["y"]), (n2["x"], n2["y"]))
+        # 重复添加同一消息应幂等
+        dup = self._post(f"/api/boards/{bid}/nodes", {"message_id": m1["id"]})
+        self.assertEqual(dup["id"], n1["id"])
+        self.assertEqual(len(self.client.get(f"/api/boards/{bid}").json()["data"]["nodes"]), 2)
+        # 连线 + 关系标签
+        e = self._post(f"/api/boards/{bid}/edges",
+                       {"from_node": n1["id"], "to_node": n2["id"], "label": "导致"})
+        self.assertEqual(e["label"], "导致")
+        detail = self.client.get(f"/api/boards/{bid}").json()["data"]
+        self.assertEqual(len(detail["edges"]), 1)
+        self.assertEqual(detail["nodes"][0]["content"], "节点一")
+        self.assertEqual(detail["nodes"][0]["conv_title"], "来源")
+        # 同方向重复连线应更新而非新增
+        self._post(f"/api/boards/{bid}/edges",
+                   {"from_node": n1["id"], "to_node": n2["id"], "label": "细化了"})
+        detail = self.client.get(f"/api/boards/{bid}").json()["data"]
+        self.assertEqual(len(detail["edges"]), 1)
+        self.assertEqual(detail["edges"][0]["label"], "细化了")
+        # 自连应被拒绝
+        r = self.client.post(f"/api/boards/{bid}/edges",
+                             json={"from_node": n1["id"], "to_node": n1["id"]})
+        self.assertEqual(r.status_code, 400)
+
+    def test_34_board_node_move_and_delete(self):
+        board = self._post("/api/boards", {"name": "拖拽"})
+        bid = board["id"]
+        conv = self._post("/api/conversations", {"title": "x"})
+        m = self._post(f"/api/conversations/{conv['id']}/messages",
+                       {"role": "user", "content": "移动我"})
+        n = self._post(f"/api/boards/{bid}/nodes", {"message_id": m["id"]})
+        r = self.client.patch(f"/api/board-nodes/{n['id']}", json={"x": 500, "y": 300})
+        self.assertEqual((r.json()["data"]["x"], r.json()["data"]["y"]), (500, 300))
+        # 备注
+        r = self.client.patch(f"/api/board-nodes/{n['id']}", json={"note": "核心论点"})
+        self.assertEqual(r.json()["data"]["note"], "核心论点")
+        # 删除节点后连线级联删除（用另一条消息建第二个节点）
+        m_b = self._post(f"/api/conversations/{conv['id']}/messages",
+                         {"role": "assistant", "content": "第二个"})
+        n2 = self._post(f"/api/boards/{bid}/nodes", {"message_id": m_b["id"]})
+        self.client.post(f"/api/boards/{bid}/edges",
+                         json={"from_node": n["id"], "to_node": n2["id"], "label": "x"})
+        self.client.delete(f"/api/board-nodes/{n['id']}")
+        detail = self.client.get(f"/api/boards/{bid}").json()["data"]
+        self.assertEqual(len(detail["nodes"]), 1)
+        self.assertEqual(len(detail["edges"]), 0, "删除节点应级联删连线")
+
+    def test_35_board_survives_message_delete(self):
+        """消息被删除后，画板节点应保留但标记为失效引用。"""
+        board = self._post("/api/boards", {"name": "失效"})
+        conv = self._post("/api/conversations", {"title": "会被删"})
+        m = self._post(f"/api/conversations/{conv['id']}/messages",
+                       {"role": "user", "content": "临时"})
+        self._post(f"/api/boards/{board['id']}/nodes", {"message_id": m["id"]})
+        self.client.delete(f"/api/messages/{m['id']}")
+        detail = self.client.get(f"/api/boards/{board['id']}").json()["data"]
+        self.assertEqual(len(detail["nodes"]), 1)
+        self.assertTrue(detail["nodes"][0]["missing"])
+
+    def test_36_board_export_markdown(self):
+        board = self._post("/api/boards", {"name": "导出板"})
+        conv = self._post("/api/conversations", {"title": "来源会话"})
+        m1 = self._post(f"/api/conversations/{conv['id']}/messages",
+                        {"role": "user", "content": "论点 A"})
+        m2 = self._post(f"/api/conversations/{conv['id']}/messages",
+                        {"role": "assistant", "content": "论点 B"})
+        n1 = self._post(f"/api/boards/{board['id']}/nodes", {"message_id": m1["id"]})
+        n2 = self._post(f"/api/boards/{board['id']}/nodes", {"message_id": m2["id"]})
+        self.client.patch(f"/api/board-nodes/{n1['id']}", json={"note": "起始点"})
+        self._post(f"/api/boards/{board['id']}/edges",
+                   {"from_node": n1["id"], "to_node": n2["id"], "label": "推导出"})
+        r = self.client.get(f"/api/boards/{board['id']}/export")
+        self.assertEqual(r.status_code, 200)
+        text = r.text
+        self.assertIn("导出板", text)
+        self.assertIn("论点 A", text)
+        self.assertIn("起始点", text)
+        self.assertIn("-->|推导出|", text)
+
+    def test_37_board_delete_cascades(self):
+        board = self._post("/api/boards", {"name": "待删"})
+        conv = self._post("/api/conversations", {"title": "x"})
+        m = self._post(f"/api/conversations/{conv['id']}/messages",
+                       {"role": "user", "content": "y"})
+        self._post(f"/api/boards/{board['id']}/nodes", {"message_id": m["id"]})
+        self.client.delete(f"/api/boards/{board['id']}")
+        self.assertEqual(self.client.get(f"/api/boards/{board['id']}").status_code, 404)
+
+    # -------------------------------------------------- 悬浮提问
+    def test_38_snippet_ask_streams_and_saves(self):
+        import asyncio
+        from unittest import mock
+
+        async def fake_stream(cfg, messages, model, effort, system):
+            # 引文与问题必须在 prompt 里
+            prompt = messages[0]["content"]
+            assert "引文" in prompt and "为何" in prompt
+            yield {"type": "text", "text": "因为"}
+            yield {"type": "text", "text": "如此"}
+            yield {"type": "done", "info": {}}
+
+        self.client.put("/api/llm/config",
+                        json={"provider": "openai", "api_key": "sk-snip"})
+        conv = self._post("/api/conversations", {"title": "悬浮"})
+        cid = conv["id"]
+        m = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "assistant", "content": "这段内容值得追问"})
+        with mock.patch("app.llm.stream_completion", fake_stream):
+            r = self.client.post(f"/api/conversations/{cid}/ask", json={
+                "source_text": "这段内容值得追问",
+                "question": "为何重要？",
+                "message_id": m["id"],
+                "provider": "openai",
+            })
+        self.assertEqual(r.status_code, 200)
+        # 流式分块输出，拼接后应为完整答案
+        self.assertIn("因为", r.text)
+        self.assertIn("如此", r.text)
+        # 已保存为独立记录
+        snippets = self.client.get(f"/api/conversations/{cid}/snippets").json()["data"]
+        self.assertEqual(len(snippets), 1)
+        self.assertEqual(snippets[0]["question"], "为何重要？")
+        self.assertEqual(snippets[0]["answer"], "因为如此")
+        self.assertEqual(snippets[0]["status"], "done")
+        self.assertEqual(snippets[0]["message_id"], m["id"])
+        # 不应污染主对话消息树
+        msgs = self.client.get(f"/api/conversations/{cid}").json()["data"]["messages"]
+        self.assertEqual(len(msgs), 1)
+        self.client.delete("/api/llm/config/openai")
+
+    def test_39_snippet_requires_input(self):
+        conv = self._post("/api/conversations", {"title": "空"})
+        r = self.client.post(f"/api/conversations/{conv['id']}/ask",
+                             json={"source_text": "", "question": ""})
+        self.assertEqual(r.status_code, 400)
+        r2 = self.client.post(f"/api/conversations/{conv['id']}/ask",
+                              json={"source_text": "有内容", "question": ""})
+        self.assertEqual(r2.status_code, 400)
+
+    def test_40_snippet_delete(self):
+        conv = self._post("/api/conversations", {"title": "删提问"})
+        import asyncio
+        from unittest import mock
+
+        async def fake(cfg, m, model, effort, system):
+            yield {"type": "text", "text": "ans"}
+            yield {"type": "done", "info": {}}
+
+        self.client.put("/api/llm/config",
+                        json={"provider": "openai", "api_key": "sk-d"})
+        cid = conv["id"]
+        with mock.patch("app.llm.stream_completion", fake):
+            self.client.post(f"/api/conversations/{cid}/ask",
+                             json={"source_text": "x", "question": "q", "provider": "openai"})
+        items = self.client.get(f"/api/conversations/{cid}/snippets").json()["data"]
+        self.client.delete(f"/api/snippets/{items[0]['id']}")
+        self.assertEqual(
+            self.client.get(f"/api/conversations/{cid}/snippets").json()["data"], [])
+        self.client.delete("/api/llm/config/openai")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

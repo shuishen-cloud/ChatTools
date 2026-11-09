@@ -73,6 +73,55 @@ CREATE TABLE IF NOT EXISTS setting (
     key         TEXT PRIMARY KEY,
     value       TEXT NOT NULL
 );
+
+-- 画板：把分散在各会话的消息放到同一画布上组织关系
+CREATE TABLE IF NOT EXISTS board (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL DEFAULT '未命名画板',
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+-- 画板节点：引用一条消息（可能来自不同会话），带画布坐标与备注
+CREATE TABLE IF NOT EXISTS board_node (
+    id          TEXT PRIMARY KEY,
+    board_id    TEXT NOT NULL REFERENCES board(id) ON DELETE CASCADE,
+    message_id  TEXT REFERENCES message(id) ON DELETE SET NULL,
+    conv_id     TEXT REFERENCES conversation(id) ON DELETE SET NULL,
+    x           REAL NOT NULL DEFAULT 0,
+    y           REAL NOT NULL DEFAULT 0,
+    note        TEXT NOT NULL DEFAULT '',
+    color       TEXT NOT NULL DEFAULT '#6b8afd',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bnode_board ON board_node(board_id);
+
+-- 画板连线：节点间的关系，label 描述关系语义
+CREATE TABLE IF NOT EXISTS board_edge (
+    id          TEXT PRIMARY KEY,
+    board_id    TEXT NOT NULL REFERENCES board(id) ON DELETE CASCADE,
+    from_node   TEXT NOT NULL REFERENCES board_node(id) ON DELETE CASCADE,
+    to_node     TEXT NOT NULL REFERENCES board_node(id) ON DELETE CASCADE,
+    label       TEXT NOT NULL DEFAULT '',
+    style       TEXT NOT NULL DEFAULT 'solid',   -- solid / dashed
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bedge_board ON board_edge(board_id);
+
+-- 悬浮提问：针对某段选中内容的独立问答，不污染主对话
+CREATE TABLE IF NOT EXISTS snippet_qa (
+    id          TEXT PRIMARY KEY,
+    conv_id     TEXT NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+    message_id  TEXT REFERENCES message(id) ON DELETE SET NULL,
+    source_text TEXT NOT NULL,
+    question    TEXT NOT NULL,
+    answer      TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'pending',
+    meta        TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sqa_conv ON snippet_qa(conv_id);
 """
 
 

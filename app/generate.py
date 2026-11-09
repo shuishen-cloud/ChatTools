@@ -5,6 +5,7 @@ import json
 
 from starlette.responses import StreamingResponse
 
+from . import boards as B
 from . import conversations as C
 from . import llm as L
 from . import settings as S
@@ -199,6 +200,102 @@ def _maybe_autotitle(conv_id: str) -> None:
         title = first["content"].strip().splitlines()[0][:24]
     with tx() as conn:
         conn.execute("UPDATE conversation SET title=? WHERE id=?", (title, conv_id))
+
+
+# ---------------------------------------------------------------- 右侧历史栏
+
+async def api_thread(request):
+    """返回会话的消息树（供右侧快速切换），每个节点带预览与分支信息。"""
+    conv_id = request.path_params["conv_id"]
+    msgs = C.get_messages(conv_id)
+    children: dict[str | None, list[dict]] = {}
+    for m in msgs:
+        children.setdefault(m["parent_id"], []).append(m)
+    for kids in children.values():
+        kids.sort(key=lambda x: x["created_at"])
+
+    def brief(m: dict) -> dict:
+        text = (m["content"] or "").replace("\n", " ").strip()
+        return {
+            "id": m["id"],
+            "role": m["role"],
+            "preview": (text[:60] + "…") if len(text) > 60 else text,
+            "favorite": bool(m["favorite"]),
+            "branch_count": len(children.get(m["id"], [])),
+            "created_at": m["created_at"],
+            "tags": m["tags"],
+            "status": (m["meta"] or {}).get("status"),
+            "children": [brief(k) for k in children.get(m["id"], [])],
+        }
+
+    roots = [brief(m) for m in children.get(None, [])]
+    return ok({"roots": roots, "total": len(msgs),
+               "main_branch": C.main_branch(msgs)})
+
+
+# ---------------------------------------------------------------- 悬浮提问
+
+async def api_snippet_ask(request):
+    """针对选中的一段文字提问，独立于主对话，不写入消息树。"""
+    import json as _json
+
+    conv_id = request.path_params["conv_id"]
+    body = await read_json(request)
+    source = (body.get("source_text") or "").strip()
+    question = (body.get("question") or "").strip()
+    if not source or not question:
+        return err("需要选中文本和问题")
+    if len(source) > 8000:
+        source = source[:8000]
+
+    snippet = B.create_snippet(conv_id, body.get("message_id"), source, question)
+    provider = body.get("provider") or S.get_active_provider()
+    if provider not in S.PROVIDERS:
+        return err("未知供应商")
+    cfg = S.get_provider_config(provider)
+    if not cfg["api_key"]:
+        return err(f"{S.PROVIDERS[provider]['label']} 尚未配置 API Key", 400)
+
+    effort = body.get("effort") or "medium"
+    model = body.get("model") or cfg["model"]
+
+    system = ("你在回答用户针对一段引文的提问。先直接回答，必要时再展开；"
+              "不要复述完整的引文。如引文信息不足，明确指出缺什么。")
+    prompt = f"引文：\n\"\"\"\n{source}\n\"\"\"\n\n问题：{question}"
+    ctx = [{"role": "user", "content": prompt}]
+
+    async def event_stream():
+        collected: list[str] = []
+        thinking: list[str] = []
+        err_msg = ""
+        try:
+            yield _sse({"type": "snippet_created", "id": snippet["id"]})
+            async for evt in L.stream_completion(cfg, ctx, model, effort, system):
+                if evt["type"] == "text":
+                    collected.append(evt["text"])
+                elif evt["type"] == "thinking":
+                    thinking.append(evt["text"])
+                elif evt["type"] == "error":
+                    err_msg = evt["message"]
+                yield _sse(evt)
+            answer = "".join(collected)
+            meta = {"model": model, "effort": effort, "provider": provider}
+            if thinking:
+                meta["thinking"] = "".join(thinking)
+            B.save_snippet_answer(snippet["id"], answer,
+                                  "error" if err_msg else "done", meta)
+            yield _sse({"type": "snippet_saved", "id": snippet["id"],
+                        "error": err_msg})
+        except Exception as exc:  # noqa: BLE001
+            B.save_snippet_answer(snippet["id"], "".join(collected), "error",
+                                  {"error": type(exc).__name__})
+            yield _sse({"type": "error", "message": f"中断：{type(exc).__name__}"})
+        finally:
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 async def api_llm_options(request):

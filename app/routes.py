@@ -9,13 +9,14 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from . import boards as B
 from . import conversations as C
 from . import exporting as E
 from . import folders as F
 from . import settings as S
 from .db import init_db
 from .exporting import content_disposition
-from .generate import api_generate, api_llm_options
+from .generate import api_generate, api_llm_options, api_snippet_ask, api_thread
 from .utils import err, ok, read_json
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -296,6 +297,112 @@ async def _probe(cfg: dict) -> dict:
     return {"ok": False, "reason": hint, "status": r.status_code}
 
 
+# ---------------------------------------------------------------- 画板
+
+async def api_boards(request):
+    if request.method == "POST":
+        body = await read_json(request)
+        return ok(B.create_board(body.get("name") or "未命名画板",
+                                 body.get("description") or ""))
+    return ok(B.list_boards())
+
+
+async def api_board_get(request):
+    board = B.get_board(request.path_params["board_id"])
+    return ok(board) if board else err("画板不存在", 404)
+
+
+async def api_board_update(request):
+    body = await read_json(request)
+    if request.method == "DELETE":
+        B.delete_board(request.path_params["board_id"])
+        return ok()
+    row = B.update_board(request.path_params["board_id"], body)
+    return ok(row) if row else err("画板不存在", 404)
+
+
+async def api_board_node_create(request):
+    body = await read_json(request)
+    mid = body.get("message_id")
+    if not mid:
+        return err("缺少 message_id")
+    return ok(B.add_node(request.path_params["board_id"], mid,
+                         body.get("conv_id"), float(body.get("x") or 0),
+                         float(body.get("y") or 0), body.get("note") or "",
+                         body.get("color") or "#6b8afd"))
+
+
+async def api_board_node(request):
+    node_id = request.path_params["node_id"]
+    if request.method == "DELETE":
+        B.delete_node(node_id)
+        return ok()
+    body = await read_json(request)
+    row = B.update_node(node_id, body)
+    return ok(row) if row else err("节点不存在", 404)
+
+
+async def api_board_edges(request):
+    body = await read_json(request)
+    try:
+        return ok(B.add_edge(request.path_params["board_id"], body.get("from_node", ""),
+                             body.get("to_node", ""), body.get("label") or "",
+                             body.get("style") or "solid"))
+    except ValueError as exc:
+        return err(str(exc))
+
+
+async def api_board_edge(request):
+    edge_id = request.path_params["edge_id"]
+    if request.method == "DELETE":
+        B.delete_edge(edge_id)
+        return ok()
+    body = await read_json(request)
+    row = B.update_edge(edge_id, body)
+    return ok(row) if row else err("连线不存在", 404)
+
+
+async def api_board_export(request):
+    """画板导出为 Markdown（节点 + 关系列表）。"""
+    board = B.get_board(request.path_params["board_id"])
+    if not board:
+        return err("画板不存在", 404)
+    lines = [f"# {board['name']}" if board['name'] else "# 画板", ""]
+    if board["description"]:
+        lines += [board["description"], ""]
+    by_id = {}
+    lines.append("## 节点")
+    for idx, n in enumerate(board["nodes"], 1):
+        by_id[n["id"]] = idx
+        src = f"（来自《{n['conv_title']}》）" if n.get("conv_title") else ""
+        lines.append(f"### {idx}. {n['note'] or (n['content'][:40] or '节点')}{src}")
+        if n["note"]:
+            lines.append(f"> {n['note']}")
+        body = n["content"] or "（消息已删除）"
+        lines += [body, ""]
+    if board["edges"]:
+        lines.append("## 关系")
+        for e in board["edges"]:
+            a = by_id.get(e["from_node"], "?")
+            b = by_id.get(e["to_node"], "?")
+            label = e["label"] or "关联"
+            arrow = "-.->" if e["style"] == "dashed" else "-->"
+            lines.append(f"- {a} {arrow}|{label}| {b}")
+    return Response("\n".join(lines), media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": content_disposition(
+                        f"{board['name'] or 'board'}.md")})
+
+
+async def api_snippets(request):
+    conv_id = request.path_params["conv_id"]
+    return ok(B.list_snippets(conv_id))
+
+
+async def api_snippet_delete(request):
+    B.delete_snippet(request.path_params["snippet_id"])
+    return ok()
+
+
 async def api_stats(request):
     from .db import db
     with db() as conn:
@@ -355,6 +462,18 @@ def create_app() -> Starlette:
         Route("/api/folders/{folder_id}", api_folder_update, methods=["PATCH", "PUT"]),
         Route("/api/folders/{folder_id}", api_folder_delete, methods=["DELETE"]),
         Route("/api/import", api_import, methods=["POST"]),
+        Route("/api/conversations/{conv_id}/thread", api_thread, methods=["GET"]),
+        Route("/api/conversations/{conv_id}/ask", api_snippet_ask, methods=["POST"]),
+        Route("/api/conversations/{conv_id}/snippets", api_snippets, methods=["GET"]),
+        Route("/api/snippets/{snippet_id}", api_snippet_delete, methods=["DELETE"]),
+        Route("/api/boards", api_boards, methods=["GET", "POST"]),
+        Route("/api/boards/{board_id}", api_board_get, methods=["GET"]),
+        Route("/api/boards/{board_id}", api_board_update, methods=["PATCH", "DELETE"]),
+        Route("/api/boards/{board_id}/export", api_board_export, methods=["GET"]),
+        Route("/api/boards/{board_id}/nodes", api_board_node_create, methods=["POST"]),
+        Route("/api/boards/{board_id}/edges", api_board_edges, methods=["POST"]),
+        Route("/api/board-nodes/{node_id}", api_board_node, methods=["PATCH", "DELETE"]),
+        Route("/api/board-edges/{edge_id}", api_board_edge, methods=["PATCH", "DELETE"]),
         Mount("/static", StaticFiles(directory=ROOT / "static"), name="static"),
     ]
     return Starlette(routes=routes)

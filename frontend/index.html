@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>ChatTool · 对话脉络管理</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 顶部栏 -->
+  <header class="topbar">
+    <button class="icon-btn only-mobile" id="btn-menu" aria-label="菜单">☰</button>
+    <div class="brand">ChatTool</div>
+    <input id="global-search" class="search" placeholder="搜索会话 / 消息…" autocomplete="off">
+    <button class="btn ghost" id="btn-import">导入</button>
+    <button class="btn primary" id="btn-new">＋ 新会话</button>
+  </header>
+
+  <div class="layout">
+    <!-- 侧栏 -->
+    <aside class="sidebar" id="sidebar">
+      <nav class="tabs">
+        <button class="tab active" data-view="conversations">会话</button>
+        <button class="tab" data-view="folders">文件夹</button>
+        <button class="tab" data-view="favorites">收藏</button>
+      </nav>
+
+      <section class="pane active" data-pane="conversations">
+        <div class="pane-head">
+          <span id="conv-scope">全部会话</span>
+          <button class="mini" id="btn-clear-scope" hidden>清除筛选</button>
+        </div>
+        <div id="conv-list" class="conv-list"></div>
+      </section>
+
+      <section class="pane" data-pane="folders">
+        <div class="pane-head">
+          <span>文件夹脉络</span>
+          <button class="mini" id="btn-new-folder">＋ 新建</button>
+        </div>
+        <div id="folder-tree" class="folder-tree"></div>
+        <p class="hint">会话可同时归入多个文件夹（多对多）。</p>
+      </section>
+
+      <section class="pane" data-pane="favorites">
+        <div class="pane-head"><span>收藏的消息</span></div>
+        <div id="fav-list" class="fav-list"></div>
+      </section>
+    </aside>
+
+    <!-- 主区 -->
+    <main class="main" id="main">
+      <div class="empty" id="empty-state">
+        <h2>选择或新建一个会话</h2>
+        <p>左侧管理会话与文件夹；每条消息可收藏、打标签、衍生分支。</p>
+      </div>
+
+      <div class="detail" id="detail" hidden>
+        <div class="detail-head">
+          <div class="title-wrap">
+            <h1 id="conv-title" contenteditable="true" spellcheck="false"></h1>
+            <div class="chips" id="conv-folders"></div>
+          </div>
+          <div class="actions">
+            <button class="btn ghost" id="btn-archive">归档</button>
+            <button class="btn ghost" id="btn-share">分享</button>
+            <div class="dropdown">
+              <button class="btn ghost" id="btn-export">导出 ▾</button>
+              <div class="menu" id="export-menu">
+                <button data-fmt="md">Markdown (.md)</button>
+                <button data-fmt="html">独立网页 (.html)</button>
+                <button data-fmt="json">JSON（可回流导入）</button>
+                <button data-fmt="txt">纯文本 (.txt)</button>
+                <hr>
+                <button data-fmt="md" data-branch="1">仅当前分支 · Markdown</button>
+              </div>
+            </div>
+            <button class="btn danger ghost" id="btn-del-conv">删除</button>
+          </div>
+        </div>
+
+        <div class="branch-bar" id="branch-bar" hidden></div>
+
+        <div class="messages" id="messages"></div>
+
+        <div class="composer">
+          <select id="composer-role">
+            <option value="user">用户</option>
+            <option value="assistant">助手</option>
+            <option value="system">系统</option>
+            <option value="tool">工具</option>
+          </select>
+          <textarea id="composer-input" rows="1" placeholder="输入一条消息… (Ctrl/⌘+Enter 发送)"></textarea>
+          <button class="btn primary" id="btn-send">发送</button>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- 会话归属文件夹的弹窗 -->
+<div class="modal" id="modal-folders" hidden>
+  <div class="modal-box">
+    <h3>归类到文件夹</h3>
+    <div id="modal-folder-list" class="check-list"></div>
+    <div class="modal-foot"><button class="btn ghost" data-close>关闭</button></div>
+  </div>
+</div>
+
+<!-- 分享弹窗 -->
+<div class="modal" id="modal-share" hidden>
+  <div class="modal-box">
+    <h3>分享此会话</h3>
+    <p class="hint">生成只读链接，对方无需登录即可查看。</p>
+    <label class="row"><input type="checkbox" id="share-branch"> 仅分享当前分支</label>
+    <div class="share-out" id="share-out"></div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close>关闭</button>
+      <button class="btn primary" id="btn-do-share">生成链接</button>
+    </div>
+  </div>
+</div>
+
+<!-- 导入弹窗 -->
+<div class="modal" id="modal-import" hidden>
+  <div class="modal-box">
+    <h3>导入会话</h3>
+    <p class="hint">支持 ChatTool JSON、Pi 会话导出（JSON），或粘贴 ChatTool 导出内容。</p>
+    <label class="row"><input type="checkbox" id="import-is-pi"> 按 Pi 会话格式解析</label>
+    <textarea id="import-text" rows="10" placeholder="粘贴 JSON…"></textarea>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close>关闭</button>
+      <button class="btn primary" id="btn-do-import">导入</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

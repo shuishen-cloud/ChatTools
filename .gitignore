@@ -1,0 +1,19 @@
+# 运行时数据（不入库）
+data/
+.run/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store

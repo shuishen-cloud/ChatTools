@@ -646,6 +646,7 @@ const Board = (() => {
           <button data-act="color" data-id="${n.id}">颜色</button>
           <button data-act="remove" data-id="${n.id}">移出</button>
         </div>
+        <div class="bnode-port" title="从这里拖到另一个节点，建立关系"></div>
       </div>`).join("");
 
     bindNodes();
@@ -660,14 +661,14 @@ const Board = (() => {
   function updateHint() {
     const hint = $("#board-hint");
     if (!state.board) { hint.textContent = ""; return; }
+    const n = state.board.nodes?.length || 0;
+    const e = state.board.edges?.length || 0;
     if (state.linkMode) {
       hint.textContent = state.linkFrom
         ? "再点一个节点完成连线（Esc 取消）"
-        : "连线模式：先点起点，再点终点";
+        : "点选模式：依次点起点和终点（也可直接拖节点右侧圆点）";
     } else {
-      const n = state.board.nodes?.length || 0;
-      const e = state.board.edges?.length || 0;
-      hint.textContent = `${n} 个节点 · ${e} 条关系`;
+      hint.textContent = `${n} 个节点 · ${e} 条关系｜拖右侧圆点到另一节点可连线`;
     }
     $("#btn-board-link").classList.toggle("on", state.linkMode);
   }
@@ -676,70 +677,89 @@ const Board = (() => {
     const box = $("#board-nodes");
     box.querySelectorAll(".bnode").forEach((el) => {
       const id = el.dataset.id;
+      const node = () => state.board.nodes.find((n) => n.id === id);
 
-      // 拖拽移动
+      /* ---------- 拖动移动 ---------- */
       el.addEventListener("pointerdown", (e) => {
-        if (e.target.closest(".bnode-tools") || e.target.isContentEditable) return;
+        // 编辑备注、点工具按钮、拉连接点时不触发移动
+        if (e.target.closest(".bnode-tools")) return;
+        if (e.target.closest(".bnode-port")) return;
+        if (e.target.isContentEditable) return;
         if (state.linkMode) return;
-        const node = state.board.nodes.find((n) => n.id === id);
-        if (!node) return;
-        state.dragging = {
+        if (!node()) return;
+        e.preventDefault();
+
+        const d = {
           id,
           startX: e.clientX,
           startY: e.clientY,
-          origX: node.x,
-          origY: node.y,
+          origX: node().x,
+          origY: node().y,
           moved: false,
         };
+        state.dragging = d;
         el.classList.add("dragging");
-        el.setPointerCapture(e.pointerId);
+        try { el.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
+
+        // 监听绑在 document 上：即使元素重渲染也不会丢事件
+        const onMove = (ev) => {
+          if (state.dragging !== d) return;
+          const dx = ev.clientX - d.startX;
+          const dy = ev.clientY - d.startY;
+          if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
+          const n = node();
+          if (!n) return;
+          n.x = Math.max(0, d.origX + dx);
+          n.y = Math.max(0, d.origY + dy);
+          el.style.left = `${n.x}px`;
+          el.style.top = `${n.y}px`;
+          renderEdges();
+        };
+
+        const onUp = async () => {
+          document.removeEventListener("pointermove", onMove);
+          document.removeEventListener("pointerup", onUp);
+          el.classList.remove("dragging");
+          if (state.dragging === d) state.dragging = null;
+
+          const n = node();
+          if (!n) return;
+          if (!d.moved) {
+            // 没移动 = 点击选中
+            state.selected = state.selected === id ? null : id;
+            renderCanvas();
+            return;
+          }
+          try {
+            await api(`/api/board-nodes/${id}`,
+              { method: "PATCH", body: { x: n.x, y: n.y } });
+          } catch (err) {
+            toast("保存位置失败：" + err.message);
+          }
+        };
+
+        document.addEventListener("pointermove", onMove);
+        document.addEventListener("pointerup", onUp);
       });
 
-      el.addEventListener("pointermove", (e) => {
-        const d = state.dragging;
-        if (!d || d.id !== id) return;
-        const dx = e.clientX - d.startX;
-        const dy = e.clientY - d.startY;
-        if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
-        const node = state.board.nodes.find((n) => n.id === id);
-        node.x = Math.max(0, d.origX + dx);
-        node.y = Math.max(0, d.origY + dy);
-        el.style.left = `${node.x}px`;
-        el.style.top = `${node.y}px`;
-        renderEdges();
-      });
-
-      el.addEventListener("pointerup", async (e) => {
-        const d = state.dragging;
-        el.classList.remove("dragging");
-        state.dragging = null;
-        if (!d || !d.moved) {
-          // 视为点击
-          if (state.linkMode) return handleLinkClick(id);
-          state.selected = state.selected === id ? null : id;
-          renderCanvas();
-          return;
-        }
-        const node = state.board.nodes.find((n) => n.id === id);
-        await api(`/api/board-nodes/${id}`,
-          { method: "PATCH", body: { x: node.x, y: node.y } });
-      });
-
-      // 备注编辑
+      /* ---------- 已存节点的备注编辑 ---------- */
       const noteEl = el.querySelector(".bnode-note");
-      noteEl.addEventListener("blur", async () => {
-        const text = noteEl.textContent.trim();
-        const node = state.board.nodes.find((n) => n.id === id);
-        if (node && node.note !== text) {
-          await api(`/api/board-nodes/${id}`, { method: "PATCH", body: { note: text } });
-          node.note = text;
-        }
-      });
-      noteEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); noteEl.blur(); }
-      });
+      if (noteEl) {
+        noteEl.addEventListener("blur", async () => {
+          const text = noteEl.textContent.trim();
+          const n = node();
+          if (n && n.note !== text) {
+            await api(`/api/board-nodes/${id}`, { method: "PATCH", body: { note: text } });
+            n.note = text;
+          }
+        });
+        noteEl.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); noteEl.blur(); }
+        });
+      }
 
-      el.querySelector(".bnode-tools").addEventListener("click", async (e) => {
+      /* ---------- 工具按钮 ---------- */
+      el.querySelector(".bnode-tools")?.addEventListener("click", async (e) => {
         const btn = e.target.closest("button[data-act]");
         if (!btn) return;
         e.stopPropagation();
@@ -750,20 +770,101 @@ const Board = (() => {
         }
         if (act === "open") {
           const convId = btn.dataset.conv;
-          if (!convId) return toast("原会话已删除");
+          if (!convId) return toast("这是一个自由文本节点");
           close();
           await openConv(convId);
         }
         if (act === "color") {
           const colors = ["#6b8afd", "#37c98b", "#e8c15a", "#e2606b", "#b57ce0"];
-          const node = state.board.nodes.find((n) => n.id === id);
-          const idx = colors.indexOf(node.color);
+          const n = node();
+          const idx = colors.indexOf(n.color);
           const next = colors[(idx + 1) % colors.length];
           await api(`/api/board-nodes/${id}`, { method: "PATCH", body: { color: next } });
           await loadBoard(state.board.id);
         }
       });
+
+      /* ---------- 连接点：从这里拖出一条线 ---------- */
+      el.querySelector(".bnode-port")?.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        startWire(id, e);
+      });
     });
+  }
+
+  /** 从 A 拖到 B 画一条线（直接拖拽，无需先开连线模式） */
+  function startWire(fromId, ev) {
+    const svg = $("#board-svg");
+    const from = state.board.nodes.find((n) => n.id === fromId);
+    if (!from) return;
+
+    const canvas = $("#board-canvas");
+    const rect = canvas.getBoundingClientRect();
+    const toCanvas = (cx, cy) => ({
+      x: cx - rect.left + canvas.scrollLeft,
+      y: cy - rect.top + canvas.scrollTop,
+    });
+
+    // 起点用连接点的实际位置，节点高度变化也能对准
+    const portEl = document.querySelector(`.bnode[data-id="${fromId}"] .bnode-port`);
+    const portRect = portEl?.getBoundingClientRect();
+    const p0 = portRect
+      ? toCanvas(portRect.left + portRect.width / 2, portRect.top + portRect.height / 2)
+      : { x: from.x + NODE_W, y: from.y + 24 };
+    const ghost = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    ghost.setAttribute("stroke", "#6b8afd");
+    ghost.setAttribute("stroke-width", "2");
+    ghost.setAttribute("stroke-dasharray", "5 4");
+    ghost.setAttribute("fill", "none");
+    svg.appendChild(ghost);
+
+    let hoverId = null;
+    const onMove = (e) => {
+      const p = toCanvas(e.clientX, e.clientY);
+      ghost.setAttribute("d", `M ${p0.x} ${p0.y} C ${p0.x + 50} ${p0.y}, `
+        + `${p.x - 50} ${p.y}, ${p.x} ${p.y}`);
+      // 高亮落点节点
+      const el = document.elementFromPoint(e.clientX, e.clientY)?.closest(".bnode");
+      const id = el?.dataset.id;
+      if (hoverId && hoverId !== id) {
+        document.querySelector(`.bnode[data-id="${hoverId}"]`)
+          ?.classList.remove("wire-target");
+      }
+      hoverId = id && id !== fromId ? id : null;
+      if (hoverId) {
+        document.querySelector(`.bnode[data-id="${hoverId}"]`)
+          ?.classList.add("wire-target");
+      }
+    };
+
+    const onUp = async (e) => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      ghost.remove();
+      if (hoverId) {
+        document.querySelector(`.bnode[data-id="${hoverId}"]`)
+          ?.classList.remove("wire-target");
+      }
+      if (!hoverId) return;   // 落在空白处 = 取消
+
+      const label = prompt("这两个节点的关系是什么？（如：导致 / 反驳 / 细化 / 前置）", "关联");
+      if (label === null) return;
+      try {
+        await api(`/api/boards/${state.board.id}/edges`, {
+          method: "POST",
+          body: { from_node: fromId, to_node: hoverId, label: label || "关联" },
+        });
+        state.dirty = true;
+        await loadBoard(state.board.id);
+        toast("已连线");
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
   }
 
   async function handleLinkClick(nodeId) {

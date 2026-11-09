@@ -1082,5 +1082,68 @@ class ChatToolTest(unittest.TestCase):
                          "不应先创建一条消息再入画板")
         self.assertIn("Board.addText", body)
 
+    # -------------------------------------------------- 画板拖拽与直接连线
+    def test_61_node_drag_handlers_on_document(self):
+        """拖拽监听必须挂在 document 上：节点重渲染后不会丢事件。"""
+        js = self.client.get("/static/panels.js").text
+        frag = js[js.index("function bindNodes()"):]
+        frag = frag[:frag.index("function startWire(")]
+        # 移动/抬起监听应绑在 document，而非仅绑在节点元素上
+        self.assertIn('document.addEventListener("pointermove", onMove)', frag)
+        self.assertIn('document.addEventListener("pointerup", onUp)', frag)
+        # 抬起时清理监听，避免残留导致后续拖动失效
+        self.assertIn('document.removeEventListener("pointermove", onMove)', frag)
+        self.assertIn('document.removeEventListener("pointerup", onUp)', frag)
+        # 拖拽保存坐标
+        self.assertIn('method: "PATCH", body: { x: n.x, y: n.y }', frag)
+
+    def test_62_direct_wire_from_port(self):
+        """从 A 拖到 B 直接连线，不要求先开启连线模式。"""
+        js = self.client.get("/static/panels.js").text
+        html = self.client.get("/").text
+        css = self.client.get("/static/style.css").text
+
+        # 节点上必须有连接点
+        self.assertIn("bnode-port", js)
+        self.assertIn(".bnode-port", css)
+        # 连接点的 pointerdown 直接开始拉线
+        self.assertIn("startWire", js)
+        port_bind = js[js.index('querySelector(".bnode-port")'):]
+        self.assertIn("pointerdown", port_bind[:120])
+        # startWire 内部不应检查 linkMode
+        wire = js[js.index("function startWire("):]
+        wire = wire[:wire.index("async function handleLinkClick")]
+        self.assertNotIn("state.linkMode", wire,
+                         "拉线不应依赖连线模式开关")
+        # 有落点高亮
+        self.assertIn("wire-target", js)
+        self.assertIn(".bnode.wire-target", css)
+        # 拖拽中的幽灵线
+        self.assertIn("stroke-dasharray", wire)
+
+    def test_63_node_touch_action_none(self):
+        """手机上拖节点不能被页面滚动抢走手势。"""
+        css = self.client.get("/static/style.css").text
+        import re
+        m = re.search(r"\.bnode\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(m)
+        self.assertIn("touch-action: none", m.group(1))
+
+    def test_64_edges_still_work_for_text_nodes(self):
+        """端到端：两个自由文本节点拖拽后连线成功。"""
+        board = self._post("/api/boards", {"name": "拖拽连线"})
+        a = self._post(f"/api/boards/{board['id']}/nodes", {"content": "起点"})
+        b = self._post(f"/api/boards/{board['id']}/nodes", {"content": "终点"})
+        # 模拟拖动后保存坐标
+        self.client.patch(f"/api/board-nodes/{a['id']}", json={"x": 300, "y": 200})
+        self.client.patch(f"/api/board-nodes/{b['id']}", json={"x": 700, "y": 420})
+        # 从 a 拉到 b
+        e = self._post(f"/api/boards/{board['id']}/edges",
+                       {"from_node": a["id"], "to_node": b["id"], "label": "指向"})
+        detail = self.client.get(f"/api/boards/{board['id']}").json()["data"]
+        self.assertEqual((detail["nodes"][0]["x"], detail["nodes"][0]["y"]), (300, 200))
+        self.assertEqual(len(detail["edges"]), 1)
+        self.assertEqual(e["label"], "指向")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

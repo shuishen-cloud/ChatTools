@@ -1024,11 +1024,18 @@ function bind() {
 
   /* ---- 右侧历史栏 ---- */
   const threadbar = $("#threadbar");
-  if (window.innerWidth <= 760) threadbar.classList.add("collapsed");
-  $("#btn-thread-toggle").onclick = () => {
-    threadbar.classList.toggle("collapsed");
-    $("#btn-thread-toggle").textContent = threadbar.classList.contains("collapsed") ? "⟨" : "⟩";
+  const toggleThread = (force) => {
+    const isCollapsed = threadbar.classList.contains("collapsed");
+    const willOpen = force !== undefined ? force : isCollapsed;
+    threadbar.classList.toggle("collapsed", !willOpen);
+    const btn = $("#btn-thread");
+    if (btn) btn.classList.toggle("on", willOpen);
+    $("#btn-thread-toggle").textContent = willOpen ? "⟩" : "⟨";
   };
+  // 手机上默认收起，桌面默认展开
+  toggleThread(window.innerWidth > 760);
+  $("#btn-thread").onclick = () => toggleThread();
+  $("#btn-thread-toggle").onclick = () => toggleThread();
   // 滚动联动高亮（节流）
   let scrollTick = false;
   $("#main").addEventListener("scroll", () => {

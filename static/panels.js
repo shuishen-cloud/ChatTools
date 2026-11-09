@@ -160,6 +160,8 @@ const AskPanel = (() => {
     streaming: false,
     abort: null,
     history: [],
+    lastQuestion: "",
+    lastAnswer: "",
   };
 
   function bubbleEl() {
@@ -177,38 +179,108 @@ const AskPanel = (() => {
 
   function ensurePanel() {
     let panel = $("#ask-panel");
-    if (!panel) {
-      panel = document.createElement("div");
-      panel.id = "ask-panel";
-      panel.className = "ask-panel";
-      panel.innerHTML = `
-        <div class="ask-panel-head">
-          <span class="t">悬浮提问</span>
-          <button class="mini" id="ask-new">新提问</button>
-          <button class="mini" id="ask-close">✕</button>
-        </div>
-        <div class="ask-body" id="ask-body"></div>
-        <div class="ask-input-row">
-          <textarea id="ask-input" rows="2" placeholder="针对选中内容提问…"></textarea>
-          <button class="btn primary" id="ask-send">问</button>
-        </div>`;
-      document.body.appendChild(panel);
-      $("#ask-close").onclick = close;
-      $("#ask-new").onclick = () => {
-        state.sourceText = "";
-        state.messageId = null;
-        renderHome();
-        $("#ask-input").focus();
-      };
-      $("#ask-send").onclick = submit;
-      $("#ask-input").onkeydown = (e) => {
-        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-          e.preventDefault();
-          submit();
-        }
-      };
-    }
+    if (panel) return panel;
+
+    panel = document.createElement("div");
+    panel.id = "ask-panel";
+    panel.className = "ask-panel";
+    panel.innerHTML = `
+      <div class="ask-panel-head" id="ask-drag">
+        <span class="t" id="ask-title">悬浮提问</span>
+        <button class="ask-head-btn" id="ask-to-board" title="把这段问答加入画板">
+          ＋ 画板</button>
+        <button class="ask-head-btn" id="ask-new">新提问</button>
+        <button class="ask-head-btn" id="ask-close">✕</button>
+      </div>
+      <div class="ask-body" id="ask-body"></div>
+      <div class="ask-input-row">
+        <textarea id="ask-input" rows="2" placeholder="针对选中内容提问…"></textarea>
+        <button class="btn primary" id="ask-send">问</button>
+      </div>`;
+    document.body.appendChild(panel);
+
+    positionPanel(panel);
+    makeDraggable(panel, $("#ask-drag"));
+
+    $("#ask-close").onclick = close;
+    $("#ask-new").onclick = () => {
+      state.sourceText = "";
+      state.messageId = null;
+      state.lastAnswer = "";
+      $("#ask-title").textContent = "悬浮提问";
+      renderHome();
+      $("#ask-input").focus();
+    };
+    $("#ask-send").onclick = submit;
+    $("#ask-to-board").onclick = () => sendToBoard();
+    $("#ask-input").onkeydown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    };
     return panel;
+  }
+
+  /* 首次出现的默认位置：右下角，留出边距 */
+  function positionPanel(panel) {
+    const w = 400, h = 460, pad = 16;
+    const left = Math.max(pad, window.innerWidth - w - pad);
+    const top = Math.max(60, window.innerHeight - h - pad);
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+  }
+
+  /* 拖动标题栏移动窗口（不影响内部文本选择） */
+  function makeDraggable(panel, handle) {
+    let drag = null;
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.target.closest("button")) return;   // 按钮不触发拖动
+      const r = panel.getBoundingClientRect();
+      drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      handle.setPointerCapture(e.pointerId);
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const w = panel.offsetWidth || 400;
+      const h = panel.offsetHeight || 460;
+      const x = Math.min(Math.max(0, e.clientX - drag.dx), window.innerWidth - w);
+      const y = Math.min(Math.max(0, e.clientY - drag.dy), window.innerHeight - 40);
+      panel.style.left = `${x}px`;
+      panel.style.top = `${y}px`;
+    });
+    handle.addEventListener("pointerup", (e) => {
+      drag = null;
+      handle.releasePointerCapture?.(e.pointerId);
+    });
+  }
+
+  /* 把「引文 + 问题 + 回答」三者作为一条消息加入画板 */
+  async function sendToBoard() {
+    const conv = state.activeConv;
+    if (!conv) return toast("先打开一个会话");
+    const answer = state.lastAnswer || "";
+    const question = state.lastQuestion || "";
+    if (!question) return toast("先提问，再把它加入画板");
+
+    // 先存成一条「提问记录」型消息，让画板能引用（用 assistant 角色承载）
+    const body = [
+      `**引文**：${state.sourceText.slice(0, 400)}`,
+      "",
+      `**问题**：${question}`,
+      "",
+      `**回答**：`,
+      answer || "（无回答）",
+    ].join("\n");
+
+    const msg = await api(`/api/conversations/${conv.id}/messages`, {
+      method: "POST",
+      body: { role: "assistant", content: body, meta: { from_snippet: true } },
+    });
+    await Board.addMessage(msg.id, conv.id);
+    toast("已把这条问答加入画板");
   }
 
   /* 选中文本 → 显示浮动按钮 */
@@ -259,8 +331,15 @@ const AskPanel = (() => {
     state.messageId = bubble.dataset.msgId || null;
     state.sourceText = text;
     const panel = ensurePanel();
+    // 若窗口已在屏幕外（窗口缩放后），重新定位
+    const r = panel.getBoundingClientRect();
+    if (!panel.classList.contains("open") || r.top < 0 || r.left < 0
+        || r.left > window.innerWidth - 60 || r.top > window.innerHeight - 40) {
+      positionPanel(panel);
+    }
     panel.classList.add("open");
     state.open = true;
+    $("#ask-title").textContent = "悬浮提问";
     renderCompose(question);
     if (!question) $("#ask-input").focus();
   }
@@ -291,6 +370,9 @@ const AskPanel = (() => {
         if (!s) return;
         state.sourceText = s.source_text;
         state.messageId = s.message_id;
+        state.lastQuestion = s.question;
+        state.lastAnswer = s.answer || "";
+        $("#ask-title").textContent = "提问记录";
         renderCompose();
         $("#ask-stream").innerHTML =
           `<div class="ask-q">${esc(s.question)}</div>
@@ -311,6 +393,8 @@ const AskPanel = (() => {
     }
 
     state.streaming = true;
+    state.lastQuestion = q;
+    state.lastAnswer = "";
     $("#ask-send").disabled = true;
     const stream = $("#ask-stream");
     stream.innerHTML = `<div class="ask-q">${esc(q)}</div>
@@ -359,6 +443,7 @@ const AskPanel = (() => {
             try { evt = JSON.parse(raw); } catch { continue; }
             if (evt.type === "text") {
               text += evt.text;
+              state.lastAnswer = text;
               out.innerHTML = MD.render(text);
             }
             if (evt.type === "error") err = evt.message;

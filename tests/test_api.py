@@ -840,5 +840,45 @@ class ChatToolTest(unittest.TestCase):
         css = self.client.get("/static/style.css").text
         self.assertRegex(css, r"\[hidden\]\s*\{[^}]*display\s*:\s*none\s*!important")
 
+    def test_46_ui_entry_points_exist(self):
+        """历史栏/画板/悬浮窗都必须有可点击的入口，且移动端不被隐藏。"""
+        html = self.client.get("/").text
+        css = self.client.get("/static/style.css").text
+        js = self.client.get("/static/panels.js").text
+
+        # 顶栏入口
+        for btn in ('id="btn-thread"', 'id="btn-board"', 'id="btn-snippets"'):
+            self.assertIn(btn, html, f"缺少入口 {btn}")
+        # 历史栏容器
+        self.assertIn('id="threadbar"', html)
+        self.assertIn('id="thread-tree"', html)
+        # 画板切换下拉
+        self.assertIn('id="board-select"', html)
+
+        # 移动端不得隐藏这些入口（曾经 #btn-board{display:none} 导致画板找不到）
+        media = css[css.index("@media (max-width: 760px)"):]
+        self.assertNotRegex(media, r"#btn-board\s*\{\s*display:\s*none")
+        self.assertNotRegex(media, r"#btn-thread\s*\{\s*display:\s*none")
+
+        # 悬浮窗应可拖动且有「加入画板」
+        self.assertIn("ask-drag", js)
+        self.assertIn("makeDraggable", js)
+        self.assertIn('id="ask-to-board"', js)
+        self.assertIn("sendToBoard", js)
+
+    def test_47_threadbar_not_collapsed_deadlock(self):
+        """手机上不应默认收起且无入口打开（曾因按钮在面板内部而死锁）。"""
+        js = self.client.get("/static/app.js").text
+        # 顶栏历史按钮必须绑定开关
+        self.assertIn('$("#btn-thread").onclick', js)
+        # 桌面默认展开、手机默认收起
+        self.assertIn("toggleThread(window.innerWidth > 760)", js)
+        # .main 必须有 min-width:0，否则会把右栏挤出视口
+        css = self.client.get("/static/style.css").text
+        import re
+        m = re.search(r"\.main\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(m)
+        self.assertIn("min-width: 0", m.group(1), ".main 缺少 min-width:0 会挤掉右栏")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

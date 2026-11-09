@@ -54,12 +54,7 @@
 
     <!-- 主区 -->
     <main class="main" id="main">
-      <div class="empty" id="empty-state">
-        <h2>选择或新建一个会话</h2>
-        <p>左侧管理会话与文件夹；每条消息可收藏、打标签、衍生分支。</p>
-      </div>
-
-      <div class="detail" id="detail" hidden>
+      <div class="detail" id="detail">
         <div class="detail-head">
           <div class="title-wrap">
             <h1 id="conv-title" contenteditable="true" spellcheck="false"></h1>
@@ -87,6 +82,13 @@
         <div class="branch-bar" id="branch-bar" hidden></div>
 
         <div class="messages" id="messages"></div>
+        <div class="welcome" id="welcome">
+          <h2>开始对话</h2>
+          <p>在下方输入框直接说话即可——发送后自动请求 AI 回复。</p>
+          <p class="hint">左侧管理会话与文件夹；右侧看历史脉络；每条消息都可收藏、
+            衍生分支、悬浮提问、加入画板。</p>
+          <pre class="boot-error" id="boot-error" hidden></pre>
+        </div>
 
         <div class="composer">
           <div class="composer-tools">

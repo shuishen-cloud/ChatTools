@@ -81,6 +81,16 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .main { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
 .empty { margin: auto; text-align: center; color: var(--dim); padding: 40px; }
 .empty h2 { color: var(--fg); font-size: 1.15rem; }
+.welcome { margin: auto; text-align: center; color: var(--dim); padding: 40px 20px; }
+.welcome h2 { color: var(--fg); font-size: 1.15rem; margin: 0 0 8px; }
+.welcome p { margin: 6px 0; }
+.welcome .hint { max-width: 34em; margin: 10px auto 0; line-height: 1.65; }
+.boot-error {
+  white-space: pre-wrap; text-align: left; font-size: 11.5px;
+  background: #241a1d; border: 1px solid #5a2b33; color: #e2606b;
+  border-radius: 8px; padding: 9px 11px; margin: 14px auto 0;
+  max-width: 640px; overflow-x: auto;
+}
 
 /* ---------------- 会话列表 ---------------- */
 .conv-list { display: flex; flex-direction: column; gap: 4px; }

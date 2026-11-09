@@ -767,5 +767,47 @@ class ChatToolTest(unittest.TestCase):
             self.client.get(f"/api/conversations/{cid}/snippets").json()["data"], [])
         self.client.delete("/api/llm/config/openai")
 
+    # -------------------------------------------------- 对话界面可用性（回归防护）
+    def test_41_chat_interface_always_available(self):
+        """用户必须先能对话：详情接口对空会话也要返回可渲染结构。"""
+        conv = self._post("/api/conversations", {"title": "未命名会话"})
+        cid = conv["id"]
+        d = self.client.get(f"/api/conversations/{cid}").json()["data"]
+        # 前端 openConv 依赖这些字段，缺一个就白屏
+        for key in ("id", "title", "messages", "main_branch", "folders"):
+            self.assertIn(key, d, f"会话详情缺少 {key}")
+        self.assertEqual(d["messages"], [])
+        self.assertEqual(d["main_branch"], [])
+        # 空会话也能立即发消息
+        m = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "user", "content": "**你好**"})
+        self.assertEqual(m["role"], "user")
+        d2 = self.client.get(f"/api/conversations/{cid}").json()["data"]
+        self.assertEqual(len(d2["messages"]), 1)
+
+    def test_42_index_has_chat_scaffold(self):
+        """首页必须包含对话界面的核心元素，且不依赖会话已存在。"""
+        html = self.client.get("/").text
+        # detail 不再带 hidden，一进来就显示
+        self.assertRegex(html, r'<div class="detail" id="detail">')
+        self.assertNotRegex(html, r'<div class="detail" id="detail"[^>]*hidden')
+        for el in ('id="messages"', 'id="composer-input"', 'id="btn-send"',
+                   'id="welcome"', 'id="boot-error"', 'id="thread-tree"'):
+            self.assertIn(el, html, f"首页缺少 {el}")
+        # 三个脚本按依赖顺序加载
+        i_md = html.index("/static/markdown.js")
+        i_pan = html.index("/static/panels.js")
+        i_app = html.index("/static/app.js")
+        self.assertLess(i_md, i_app)
+        self.assertLess(i_pan, i_app)
+
+    def test_43_thread_ready_for_empty_conversation(self):
+        """空会话的历史栏接口也要返回合法结构，不能让右栏报错。"""
+        conv = self._post("/api/conversations", {"title": "空会话"})
+        d = self.client.get(f"/api/conversations/{conv['id']}/thread").json()["data"]
+        self.assertEqual(d["roots"], [])
+        self.assertEqual(d["total"], 0)
+        self.assertIn("main_branch", d)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

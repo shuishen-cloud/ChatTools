@@ -13,6 +13,20 @@ const state = {
 };
 
 /* ---------------------------------------------------------------- API */
+/* 启动自检：任何异常都要显式告诉用户，而不是静默白屏 */
+function fatal(where, err) {
+  console.error("[ChatTool] " + where, err);
+  const box = document.getElementById("boot-error");
+  if (box) {
+    box.hidden = false;
+    box.textContent = `启动失败（${where}）：${err && err.message ? err.message : err}`;
+  }
+}
+
+window.addEventListener("error", (e) => fatal("脚本错误", e.error || e.message));
+window.addEventListener("unhandledrejection", (e) => fatal("未处理的 Promise", e.reason));
+
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -180,8 +194,7 @@ async function openConv(id) {
   state.activeConv = await api(`/api/conversations/${id}`);
   state.editingMsgId = null;
   state.showAllBranches = false;
-  $("#empty-state").hidden = true;
-  $("#detail").hidden = false;
+  $("#welcome").hidden = (state.activeConv.messages || []).length > 0;
   $("#conv-title").textContent = state.activeConv.title;
   renderConvFolders();
   renderMessages();
@@ -633,19 +646,31 @@ async function archiveConv() {
   await api(`/api/conversations/${state.activeConv.id}`, { method: "PATCH", body: { archived: 1 } });
   toast("已归档");
   state.activeConv = null;
-  $("#detail").hidden = true;
-  $("#empty-state").hidden = false;
-  loadConvs();
+  await loadConvs();
+  if (state.convs.length) await openConv(state.convs[0].id);
+  else await ensureConversation();
 }
 
 async function deleteConv() {
   if (!confirm("彻底删除该会话及其所有消息？")) return;
   await api(`/api/conversations/${state.activeConv.id}`, { method: "DELETE" });
   state.activeConv = null;
-  $("#detail").hidden = true;
-  $("#empty-state").hidden = false;
-  await loadConvs();
   toast("已删除");
+  await loadConvs();
+  if (state.convs.length) await openConv(state.convs[0].id);
+  else await ensureConversation();
+}
+
+/** 保证总有一个可用的会话：没有就自动建一个空会话 */
+async function ensureConversation() {
+  if (state.activeConv && state.convs.some((c) => c.id === state.activeConv.id)) return;
+  if (state.convs.length) return openConv(state.convs[0].id);
+  const conv = await api("/api/conversations", {
+    method: "POST",
+    body: { title: "未命名会话", folder_ids: state.scopeFolder ? [state.scopeFolder] : [] },
+  });
+  await loadConvs();
+  return openConv(conv.id);
 }
 
 async function newConversation() {
@@ -1068,11 +1093,21 @@ function bind() {
 
 /* ---------------------------------------------------------------- 启动 */
 (async function init() {
-  bind();
-  await loadFolders();
-  await loadConvs();
-  await loadComposerOptions().catch(() => { /* 离线时忽略 */ });
-  if (state.convs.length) openConv(state.convs[0].id);
-  const stats = await api("/api/stats").catch(() => null);
-  if (stats) console.info("ChatTool", stats);
+  try {
+    bind();
+  } catch (e) {
+    fatal("绑定事件", e);
+    return;
+  }
+  // 各启动步骤独立容错：任何一步失败都不该让对话界面消失
+  await loadFolders().catch((e) => fatal("加载文件夹", e));
+  await loadConvs().catch((e) => fatal("加载会话列表", e));
+  await loadComposerOptions().catch(() => { /* 离线/无 Key 时忽略 */ });
+  Board.loadBoards().catch(() => {});
+  try {
+    await ensureConversation();      // 一进来就有可输入的对话界面
+  } catch (e) {
+    fatal("打开会话", e);
+  }
+  api("/api/stats").then((s) => console.info("ChatTool", s)).catch(() => {});
 })();

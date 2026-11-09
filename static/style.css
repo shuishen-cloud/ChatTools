@@ -190,18 +190,39 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 /* ---------------- 输入区 ---------------- */
 .composer {
-  position: sticky; bottom: 0; display: flex; gap: 8px; align-items: flex-end;
-  padding: 10px 18px 16px; background: linear-gradient(transparent, var(--bg) 30%);
+  position: sticky; bottom: 0; display: flex; flex-direction: column; gap: 7px;
+  padding: 10px 18px 16px; background: linear-gradient(transparent, var(--bg) 25%);
   max-width: 880px; width: 100%; margin: 0 auto;
 }
-.composer select { background: var(--card); border: 1px solid var(--line);
-  border-radius: 9px; padding: 8px 6px; }
-.composer textarea {
+.composer-tools { display: flex; gap: 6px; flex-wrap: wrap; }
+.composer-tools select {
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  padding: 4px 7px; font-size: 12px; color: var(--dim); max-width: 46vw;
+  outline: none; cursor: pointer;
+}
+.composer-tools select:focus { border-color: var(--acc); color: var(--fg); }
+.composer-tools option { background: var(--card); color: var(--fg); }
+.composer-tools select.set { color: var(--fg); border-color: #39415a; }
+.role-select { opacity: .75; }
+.composer-main { display: flex; gap: 8px; align-items: flex-end; }
+.composer-main textarea {
   flex: 1; background: var(--card); border: 1px solid var(--line);
   border-radius: 10px; padding: 9px 12px; resize: none; outline: none;
-  max-height: 200px;
+  max-height: 200px; min-width: 0;
 }
-.composer textarea:focus { border-color: var(--acc); }
+.composer-main textarea:focus { border-color: var(--acc); }
+.composer-main textarea:disabled { opacity: .6; }
+.strength-tag { font-size: 10.5px; color: var(--dim); }
+.thinking-block { margin-bottom: 8px; border-left: 2px solid #4b5570;
+  padding-left: 9px; color: var(--dim); font-size: 13px; }
+.thinking-block summary { cursor: pointer; font-size: 12px; color: #7d879b;
+  list-style: none; }
+.thinking-block summary::-webkit-details-marker { display: none; }
+.thinking-body { white-space: pre-wrap; margin-top: 5px; opacity: .85; }
+.cursor-blink::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--acc); }
+@keyframes blink { 50% { opacity: 0; } }
+.msg.streaming { border-color: #34406b; box-shadow: 0 0 0 1px #2a3350 inset; }
+.msg.error-msg { border-color: #5a2b33; background: #241a1d; }
 
 /* ---------------- 弹窗 / 提示 ---------------- */
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.55);
@@ -266,7 +287,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .actions { gap: 4px; }
   .messages { padding: 12px; }
   .composer { padding: 8px 12px 14px; }
-  .composer select { display: none; }
+  .composer-tools select { font-size: 11.5px; max-width: none; }
+  .role-select { display: none; }
   #btn-del-conv, #btn-archive { display: none; }
   .key-row { flex-wrap: wrap; }
 }

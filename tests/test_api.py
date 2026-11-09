@@ -399,5 +399,161 @@ class ChatToolTest(unittest.TestCase):
         finally:
             os.environ.pop("DEEPSEEK_API_KEY", None)
 
+    # -------------------------------------------------- 生成 / 模型切换（核心修复）
+    def test_23_generate_persists_reply(self):
+        """发送消息后必须真的产生 assistant 回复并落库（此前的 bug）。"""
+        import asyncio
+        from unittest import mock
+
+        async def fake_stream(cfg, messages, model, effort, system):
+            yield {"type": "start", "info": {"model": model, "effort_requested": effort,
+                                             "effort_effective": effort,
+                                             "reasoning_supported": True}}
+            yield {"type": "text", "text": "你好"}
+            yield {"type": "text", "text": "，世界"}
+            yield {"type": "done", "info": {"chunks": 2, "effort_effective": effort}}
+
+        conv = self._post("/api/conversations", {"title": "生成测试"})
+        cid = conv["id"]
+        self.client.put("/api/llm/config", json={"provider": "openai", "api_key": "sk-gen-1"})
+        self._post(f"/api/conversations/{cid}/messages", {"role": "user", "content": "打个招呼"})
+
+        with mock.patch("app.llm.stream_completion", fake_stream):
+            r = self.client.post(f"/api/conversations/{cid}/generate",
+                                 json={"provider": "openai", "model": "deepseek-chat",
+                                       "effort": "low"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("text/event-stream", r.headers["content-type"])
+        self.assertIn("你好", r.text)
+        # 落库校验
+        msgs = self.client.get(f"/api/conversations/{cid}").json()["data"]["messages"]
+        roles = [m["role"] for m in msgs]
+        self.assertEqual(roles, ["user", "assistant"])
+        self.assertEqual(msgs[1]["content"], "你好，世界")
+        self.assertEqual(msgs[1]["meta"]["status"], "done")
+        self.assertEqual(msgs[1]["meta"]["model"], "deepseek-chat")
+        self.client.delete("/api/llm/config/openai")
+
+    def test_23b_autotitle_only_when_default(self):
+        """仅当标题仍是默认值时才用首条用户消息自动命名。"""
+        import asyncio
+        from unittest import mock
+
+        async def fake_stream(cfg, messages, model, effort, system):
+            yield {"type": "text", "text": "ok"}
+            yield {"type": "done", "info": {}}
+
+        conv = self._post("/api/conversations", {})   # 标题为「未命名会话」
+        cid = conv["id"]
+        self.client.put("/api/llm/config", json={"provider": "openai", "api_key": "sk-t"})
+        self._post(f"/api/conversations/{cid}/messages",
+                   {"role": "user", "content": "帮我设计一个数据库"})
+        with mock.patch("app.llm.stream_completion", fake_stream):
+            self.client.post(f"/api/conversations/{cid}/generate", json={"provider": "openai"})
+        title = self.client.get(f"/api/conversations/{cid}").json()["data"]["title"]
+        self.assertEqual(title, "帮我设计一个数据库")
+        self.client.delete("/api/llm/config/openai")
+
+    def test_24_generate_requires_key(self):
+        import os
+        for n in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                  "ANTHROPIC_API_KEY"):
+            os.environ.pop(n, None)
+        # 清空 DB 中所有已存 Key，确保真的「无 Key」
+        for prov in ("openai", "deepseek", "anthropic", "deepseek_anthropic"):
+            self.client.delete(f"/api/llm/config/{prov}")
+        conv = self._post("/api/conversations", {"title": "无 Key"})
+        self._post(f"/api/conversations/{conv['id']}/messages",
+                   {"role": "user", "content": "hi"})
+        r = self.client.post(f"/api/conversations/{conv['id']}/generate",
+                             json={"provider": "openai"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("API Key", r.json()["error"])
+
+    def test_25_generate_records_error_not_crash(self):
+        import asyncio
+        from unittest import mock
+
+        async def bad_stream(cfg, messages, model, effort, system):
+            yield {"type": "error", "message": "Key 无效或权限不足 (HTTP 401)"}
+
+        conv = self._post("/api/conversations", {"title": "错误"})
+        cid = conv["id"]
+        self.client.put("/api/llm/config", json={"provider": "openai", "api_key": "sk-bad"})
+        self._post(f"/api/conversations/{cid}/messages", {"role": "user", "content": "q"})
+        with mock.patch("app.llm.stream_completion", bad_stream):
+            r = self.client.post(f"/api/conversations/{cid}/generate",
+                                 json={"provider": "openai"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("401", r.text)
+        msgs = self.client.get(f"/api/conversations/{cid}").json()["data"]["messages"]
+        assistant = [m for m in msgs if m["role"] == "assistant"][0]
+        self.assertEqual(assistant["meta"]["status"], "error")
+        self.assertIn("401", assistant["meta"]["error"])
+        self.client.delete("/api/llm/config/openai")
+
+    def test_26_llm_options_for_switcher(self):
+        data = self.client.get("/api/llm/options").json()["data"]
+        self.assertIn("providers", data)
+        self.assertIn("efforts", data)
+        self.assertEqual([e["value"] for e in data["efforts"]],
+                         ["off", "low", "medium", "high"])
+        ds = [p for p in data["providers"] if p["provider"] == "deepseek"][0]
+        self.assertIn("deepseek-reasoner", ds["models"])
+
+    def test_27_free_tier_effort_downgrade(self):
+        """模型不支持推理时应降级为 off，且不把参数字段发上去。"""
+        from app import llm
+        cfg = {"protocol": "anthropic", "api_key": "k",
+               "base_url": "https://api.deepseek.com/anthropic"}
+        _, _, payload, info = llm.build_request(cfg, [{"role": "user", "content": "x"}],
+                                               "deepseek-chat", "high", None)
+        self.assertEqual(info["effort_effective"], "off")
+        self.assertNotIn("thinking", payload)
+        # 支持推理的模型应真发参数
+        _, _, payload2, info2 = llm.build_request(cfg, [{"role": "user", "content": "x"}],
+                                                 "deepseek-reasoner", "high", None)
+        self.assertEqual(info2["effort_effective"], "high")
+        self.assertIn("thinking", payload2)
+        self.assertGreater(payload2["max_tokens"], payload2["thinking"]["budget_tokens"])
+
+    def test_28_branch_context_only_ancestors(self):
+        """生成上下文只能包含当前分支祖先链，不能把兄弟分支混进来。"""
+        from app.generate import branch_context
+        conv = self._post("/api/conversations", {"title": "上下文"})
+        cid = conv["id"]
+        u = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "user", "content": "主线问题"})
+        a1 = self._post(f"/api/conversations/{cid}/messages",
+                        {"role": "assistant", "content": "答案一", "parent_id": u["id"]})
+        # 在 u 下再开一条分支（兄弟）
+        a2 = self._post("/api/messages/" + a1["id"] + "/branch", {"content": "答案二"})
+        ctx1 = branch_context(cid, a1["id"])
+        ctx2 = branch_context(cid, a2["id"])
+        # 末尾可能补一条 "请继续。" 以确保以 user 结尾
+        self.assertEqual([m["content"] for m in ctx1][:2], ["主线问题", "答案一"])
+        self.assertEqual([m["content"] for m in ctx2][:2], ["主线问题", "答案二"])
+        self.assertEqual(ctx1[-1]["role"], "user")
+        # 两条分支互不可见
+        self.assertNotIn("答案二", str(ctx1))
+        self.assertNotIn("答案一", str(ctx2))
+
+    def test_29_protocol_event_parsing(self):
+        from app.llm import _extract_events
+        # anthropic
+        self.assertEqual(
+            _extract_events({"type": "content_block_delta",
+                             "delta": {"type": "text_delta", "text": "hi"}}, "anthropic"),
+            [{"type": "text", "text": "hi"}])
+        self.assertEqual(
+            _extract_events({"type": "content_block_delta",
+                             "delta": {"type": "thinking_delta", "thinking": "想"}}, "anthropic"),
+            [{"type": "thinking", "text": "想"}])
+        # openai + reasoning_content
+        ev = _extract_events({"choices": [{"delta": {"reasoning_content": "推", "content": "答"}}]},
+                             "openai")
+        self.assertEqual(ev, [{"type": "thinking", "text": "推"},
+                              {"type": "text", "text": "答"}])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

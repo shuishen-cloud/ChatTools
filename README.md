@@ -16,6 +16,49 @@
 | **导入** | ChatTool 自有 JSON 回流；直接解析 **Pi** 会话导出；宽松解析其他 `{messages:[...]}` 结构 |
 | **移动优先** | 单页无构建、响应式；Termux / 手机浏览器可用 |
 | **API Key 设置** | 右上角 ⚙ 打开设置，支持 **DeepSeek** / Anthropic / OpenAI 兼容；存服务端、只回显尾 4 位；可测连接 |
+| **真对话生成** | 底部输入框发送后**流式请求 AI 回复**并落库；可中途停止；失败会记录错误而非丢消息 |
+| **服务商 / 模型 / 思考强度切换** | 聊天框底部三个下拉：服务商、模型、思考档位（关/低/中/高），选择本地记忆 |
+| **推理过程可见** | 支持推理的模型会流式显示「思考过程」，与正文分开保存 |
+| **分支感知上下文** | 生成时只把当前分支的祖先链发给模型，兄弟分支互不污染 |
+
+## 对话生成与思考强度
+
+### 为什么之前「测试正常但不回复」
+
+早期版本的计划中，⚙ 设置里的「测试连接」是一条独立的凭证探针（`_probe`），它只验证 Key 能否调通上游；而**聊天框的发送按钮只把消息写入数据库，从来没有调用过 LLM**。两者看似矛盾，实际上是两个不相干的路径。现在已接通：发送 → 保存 → 流式生成 → 落库。
+
+### 底部控制条
+
+输入框上方三个下拉，选择会记在 `localStorage`（按服务商分别记住上次的模型）：
+
+| 控件 | 说明 |
+|---|---|
+| 服务商 | 列出全部 provider，未配置 Key 的会标「未配置」 |
+| 模型 | 该服务商的模型列表（如 `deepseek-chat` / `deepseek-reasoner`） |
+| 思考强度 | `关闭 / 低 / 中 / 高` |
+
+发送按钮旁还有 **仅存**（只写消息不请求回复，方便先批量整理）和生成中的 **停止**。
+
+### 思考强度如何映射
+
+统一抽象 `off / low / medium / high`，按协议翻译：
+
+| 协议 | 参数 | 预算 |
+|---|---|---|
+| Anthropic | `thinking: {type: enabled, budget_tokens}` | low 2048 / medium 8192 / high 24576 |
+| OpenAI 兼容 | `reasoning_effort` | low / medium / high |
+| 关闭 | 不推理，改发 `temperature: 0.7` | — |
+
+**自动降级**：选中的模型若不支持推理参数（如 `deepseek-chat`、`gpt-4o`），会降为 `off` 并跳过该字段，而不是被上游 400 拒绝。前端会提示「已降为 off：该模型不支持推理参数」。
+
+> Anthropic 协议下开启 thinking 时不允许传 `temperature`，因此会自动省略；同时保证 `max_tokens > budget_tokens`，否则上游会报错。
+
+### 分支与上下文
+
+`branch_context()` 只取**当前叶子的祖先链**，因此：
+
+- 在分支 A 继续对话，模型看不到分支 B 的内容；
+- 「重新生成」按钮针对被点击的那条 user 消息重开一条兄弟分支，旧回答保留。
 
 ## API Key 设置
 
@@ -131,6 +174,9 @@ PATCH  /api/conversations/{id}                     标题/摘要/归档
 DELETE /api/conversations/{id}
 PUT    /api/conversations/{id}/folders             整体设置归属文件夹
 POST   /api/conversations/{id}/messages            追加消息（parent_id 可省）
+POST   /api/conversations/{id}/generate           流式生成回复（SSE）
+        body: {leaf_id?, provider?, model?, effort?, system?}
+GET    /api/llm/options                            底部切换器的选项/档位
 GET    /api/conversations/{id}/export?format=&branch_only=
 POST   /api/conversations/{id}/share               生成分享令牌
 
@@ -167,6 +213,8 @@ app/
   conversations.py 会话与消息树（分支、收藏、兄弟节点）
   folders.py       文件夹多对多、标签
   settings.py      LLM 供应商 / API Key 脱敏存取
+  llm.py           上游调用、协议适配、思考强度映射与降级
+  generate.py      分支上下文构建、SSE 流式生成、自动命名
   exporting.py     导出 / 分享 / 导入（含 Pi 解析）
   routes.py        Starlette 路由
   main.py          入口

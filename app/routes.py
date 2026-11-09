@@ -15,6 +15,7 @@ from . import folders as F
 from . import settings as S
 from .db import init_db
 from .exporting import content_disposition
+from .generate import api_generate, api_llm_options
 from .utils import err, ok, read_json
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -336,6 +337,8 @@ def create_app() -> Starlette:
         Route("/api/conversations/{conv_id}/folders/{folder_id}", api_conv_link,
               methods=["POST", "DELETE"]),
         Route("/api/conversations/{conv_id}/messages", api_msg_create, methods=["POST"]),
+        Route("/api/conversations/{conv_id}/generate", api_generate, methods=["POST"]),
+        Route("/api/llm/options", api_llm_options, methods=["GET"]),
         Route("/api/conversations/{conv_id}/export", api_export, methods=["GET"]),
         Route("/api/conversations/{conv_id}/share", api_share_create, methods=["POST"]),
         Route("/api/shares/{token}", api_share_revoke, methods=["DELETE"]),

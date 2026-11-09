@@ -222,28 +222,43 @@ function renderMessages() {
     const multi = m.child_count > 1
       ? `<span class="branch-chip">🔀 ${m.child_count} 分支</span>` : "";
     const editing = state.editingMsgId === m.id;
+    const meta = m.meta || {};
+    const tagBits = [];
+    if (meta.model) tagBits.push(esc(meta.model));
+    if (meta.effort && meta.effort !== "medium") tagBits.push("思考·" + esc(meta.effort));
+    if (meta.status === "error") tagBits.push("⚠ 失败");
+    const metaLine = tagBits.length
+      ? `<span class="strength-tag">${tagBits.join(" · ")}</span>` : "";
+    const thinking = meta.thinking
+      ? `<details class="thinking-block"><summary>💭 思考过程</summary>
+           <div class="thinking-body">${esc(meta.thinking)}</div></details>` : "";
+    const warn = meta.status === "error" && meta.error
+      ? `<div class="test-result bad" style="margin-top:8px">✗ ${esc(meta.error)}</div>` : "";
     const body = editing
       ? `<textarea class="edit-area" id="edit-${m.id}">${esc(m.content)}</textarea>
          <div class="msg-foot" style="opacity:1">
            <button class="tool-btn" data-act="save-edit" data-id="${m.id}">保存为分支</button>
            <button class="tool-btn" data-act="cancel-edit">取消</button>
          </div>`
-      : `<div class="msg-body">${esc(m.content)}</div>`;
+      : `<div class="msg-body">${esc(m.content) || (meta.status === "error" ? "" : "…")}</div>`;
     return `
-      <div class="msg ${m.role} ${dim} ${faved}" data-id="${m.id}">
+      <div class="msg ${m.role} ${dim} ${faved} ${meta.status === "error" ? "error-msg" : ""}"
+           data-id="${m.id}">
         <div class="msg-head">
           <span class="who">${roleName(m.role)}</span>
           <span>${fmtTime(m.created_at)}</span>
           ${m.favorite ? '<span style="color:var(--gold)">⭐</span>' : ""}
-          ${tags}${multi}
+          ${metaLine}${tags}${multi}
         </div>
-        ${body}
+        ${thinking}
+        ${body}${warn}
         ${editing ? "" : `<div class="msg-foot">
           <button class="tool-btn ${m.favorite ? "on" : ""}" data-act="fav" data-id="${m.id}">
             ${m.favorite ? "⭐ 已收藏" : "☆ 收藏"}</button>
           <button class="tool-btn" data-act="edit" data-id="${m.id}">✎ 编辑分支</button>
           <button class="tool-btn" data-act="tag" data-id="${m.id}"># 标签</button>
           <button class="tool-btn" data-act="branch" data-id="${m.id}">⌥ 查看分支</button>
+          ${m.role === "user" ? `<button class="tool-btn" data-act="regen" data-id="${m.id}">↻ 重新生成</button>` : ""}
           <button class="tool-btn" data-act="del" data-id="${m.id}">🗑</button>
         </div>`}
       </div>`;
@@ -307,20 +322,280 @@ async function deleteMsg(id) {
   await openConv(state.activeConv.id);
 }
 
-/* ---------------------------------------------------------------- 会话操作 */
-async function sendMessage() {
+/* ---------------------------------------------------------------- 底部：服务商 / 模型 / 思考强度 */
+const composerState = {
+  options: null,
+  provider: null,
+  model: null,
+  effort: "medium",
+  streaming: false,
+  abort: null,
+};
+
+const PREF_KEY = "chattool.composer";
+
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(PREF_KEY) || "{}"); } catch { return {}; }
+}
+function savePrefs() {
+  try {
+    const prev = loadPrefs();
+    // 按服务商分别记住上次选的模型
+    const perProvider = { ...(prev.perProvider || {}) };
+    if (composerState.provider && composerState.model) {
+      perProvider[composerState.provider] = composerState.model;
+    }
+    localStorage.setItem(PREF_KEY, JSON.stringify({
+      provider: composerState.provider,
+      model: composerState.model,
+      effort: composerState.effort,
+      perProvider,
+    }));
+  } catch { /* 隐私模式下忽略 */ }
+}
+
+async function loadComposerOptions() {
+  composerState.options = await api("/api/llm/options");
+  const prefs = loadPrefs();
+  const { providers } = composerState.options;
+  const okProviders = providers.filter((p) => p.configured);
+  const preferred = [prefs.provider, ...providers.filter(p => p.active).map(p => p.provider)]
+    .find((id) => id && okProviders.some((p) => p.provider === id));
+  composerState.provider = preferred || okProviders[0]?.provider || providers[0]?.provider;
+  composerState.effort = prefs.effort || composerState.options.default_effort || "medium";
+  syncModelFromProvider(prefs.model);
+  renderComposerSelects();
+}
+
+function currentProvider() {
+  return (composerState.options?.providers || [])
+    .find((p) => p.provider === composerState.provider);
+}
+
+function syncModelFromProvider(preferModel) {
+  const p = currentProvider();
+  if (!p) return;
+  const list = p.models || [];
+  const saved = loadPrefs();
+
+  // 优先级：显式传入 > 该服务商上次选的模型 > 该服务商默认模型
+  const remembered = saved.perProvider?.[p.provider];
+  const candidates = [preferModel, remembered, p.default_model];
+  let chosen = null;
+  for (const c of candidates) {
+    if (!c) continue;
+    if (!list.length || list.includes(c)) { chosen = c; break; }
+  }
+  composerState.model = chosen || list[0] || p.default_model;
+}
+
+function renderComposerSelects() {
+  const o = composerState.options;
+  if (!o) return;
+
+  const pSel = $("#composer-provider");
+  pSel.innerHTML = o.providers.map((p) =>
+    `<option value="${p.provider}" ${p.provider === composerState.provider ? "selected" : ""}>
+       ${esc(p.label)}${p.configured ? "" : "（未配置）"}</option>`).join("");
+  const cur = currentProvider();
+  pSel.classList.toggle("set", !!cur?.configured);
+
+  const mSel = $("#composer-model");
+  const models = cur?.models || [];
+  if (models.length) {
+    mSel.innerHTML = models.map((m) =>
+      `<option value="${esc(m)}" ${m === composerState.model ? "selected" : ""}>${esc(m)}</option>`).join("");
+    mSel.hidden = false;
+  } else {
+    mSel.innerHTML = `<option>${esc(cur?.default_model || "")}</option>`;
+    mSel.hidden = false;
+  }
+
+  const eSel = $("#composer-effort");
+  eSel.innerHTML = o.efforts.map((e) =>
+    `<option value="${e.value}" ${e.value === composerState.effort ? "selected" : ""}>
+       思考·${esc(e.label)}</option>`).join("");
+  eSel.classList.toggle("set", composerState.effort !== "off");
+
+  // 未配置时明显提示
+  if (!cur?.configured) {
+    pSel.title = "该服务商未配置 API Key，点右上角 ⚙ 设置";
+  }
+}
+
+/* ---------------------------------------------------------------- 流式生成 */
+async function generateReply({ fromId = null } = {}) {
+  const conv = state.activeConv;
+  if (!conv || composerState.streaming) return;
+  const leaf = fromId || lastMessageId();
+  const btnSend = $("#btn-send"), btnStop = $("#btn-stop");
+
+  composerState.streaming = true;
+  btnSend.disabled = true;
+  btnStop.hidden = false;
+  $("#composer-input").disabled = true;
+
+  const controller = new AbortController();
+  composerState.abort = controller;
+
+  // 插入占位气泡
+  const holder = document.createElement("div");
+  holder.className = "msg assistant streaming";
+  holder.id = "msg-streaming";
+  holder.innerHTML = `
+    <div class="msg-head"><span class="who">🤖 助手</span>
+      <span class="strength-tag" id="stream-tag">${
+        esc(composerState.provider)} / ${esc(composerState.model)} · 思考·${
+        esc(composerState.effort)}</span></div>
+    <details class="thinking-block" id="stream-thinking" hidden open>
+      <summary>💭 思考过程</summary><div class="thinking-body"></div>
+    </details>
+    <div class="msg-body cursor-blink" id="stream-body"></div>`;
+  $("#messages").appendChild(holder);
+  holder.scrollIntoView({ behavior: "smooth", block: "end" });
+
+  const bodyEl = () => $("#stream-body");
+  const thinkEl = () => $("#stream-thinking");
+  let text = "";
+  let thinkingText = "";
+  let savedId = null;
+  let errMsg = "";
+
+  try {
+    const res = await fetch(`/api/conversations/${conv.id}/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        leaf_id: leaf,
+        provider: composerState.provider,
+        model: composerState.model,
+        effort: composerState.effort,
+      }),
+    });
+
+    if (!res.ok || !(res.headers.get("content-type") || "").includes("event-stream")) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const chunk = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        for (const line of chunk.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const raw = line.slice(5).trim();
+          if (!raw || raw === "[DONE]") continue;
+          let evt;
+          try { evt = JSON.parse(raw); } catch { continue; }
+          if (evt.type === "message_created") savedId = evt.id;
+          if (evt.type === "text") {
+            text += evt.text;
+            bodyEl().textContent = text;
+            holder.scrollIntoView({ block: "end" });
+          }
+          if (evt.type === "thinking") {
+            thinkingText += evt.text;
+            thinkEl().hidden = false;
+            $(".thinking-body", thinkEl()).textContent = thinkingText;
+          }
+          if (evt.type === "start" && evt.info) {
+            const eff = evt.info.effort_effective;
+            const tag = $("#stream-tag");
+            if (tag) {
+              const warn = evt.info.effort_requested !== eff
+                ? `（已降为 ${eff}：该模型不支持推理参数）` : "";
+              tag.textContent = `${evt.info.model} · 思考·${eff}${warn}`;
+            }
+          }
+          if (evt.type === "error") errMsg = evt.message;
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === "AbortError") errMsg = "__aborted__";
+    else errMsg = e.message;
+  } finally {
+    composerState.streaming = false;
+    composerState.abort = null;
+    btnSend.disabled = false;
+    btnStop.hidden = true;
+    $("#composer-input").disabled = false;
+
+    if (errMsg && errMsg !== "__aborted__") {
+      holder.classList.add("error-msg");
+      bodyEl().classList.remove("cursor-blink");
+      bodyEl().textContent = text || "（无内容）";
+      const errLine = document.createElement("div");
+      errLine.className = "test-result bad";
+      errLine.textContent = "✗ " + errMsg;
+      holder.appendChild(errLine);
+      toast(errMsg, 4000);
+    } else if (!text && !thinkingText) {
+      holder.remove();
+      if (errMsg === "__aborted__") toast("已停止");
+    }
+  }
+
+  // 无论成败都刷新一次，拿服务端落库的真实内容
+  await openConv(conv.id);
+  loadConvs();
+}
+
+function lastMessageId() {
+  const conv = state.activeConv;
+  if (!conv?.messages?.length) return null;
+  const { main } = ancestryMap(conv.messages);
+  const ordered = conv.messages.filter((m) => main.has(m.id));
+  return ordered.length ? ordered[ordered.length - 1].id : null;
+}
+
+function stopStreaming() {
+  composerState.abort?.abort();
+}
+
+/* ---------------------------------------------------------------- 发送消息 */
+async function sendMessage(mode = "ai") {
   const input = $("#composer-input");
   const content = input.value.trim();
-  if (!content || !state.activeConv) return;
+  if (!content || !state.activeConv || composerState.streaming) return;
+  const role = $("#composer-role").value;
+
   await api(`/api/conversations/${state.activeConv.id}/messages`, {
     method: "POST",
-    body: { role: $("#composer-role").value, content },
+    body: { role, content },
   });
   input.value = "";
   input.style.height = "auto";
   await openConv(state.activeConv.id);
-  $("#messages").lastElementChild?.scrollIntoView({ behavior: "smooth", block: "end" });
+  const newId = lastMessageId();
+  $(`.msg[data-id="${newId}"]`)?.scrollIntoView({ behavior: "smooth", block: "end" });
   loadConvs();
+
+  // 只有用户角色且选择生成时才请求 AI 回复
+  const wantAI = mode === "ai" && role === "user";
+  if (wantAI) {
+    const p = currentProvider();
+    if (!p?.configured) {
+      toast("该服务商未配置 API Key，请点右上角 ⚙ 设置", 3500);
+      return;
+    }
+    await generateReply();
+  }
+}
+
+async function retryWithCurrent() {
+  if (!state.activeConv) return;
+  await generateReply();
 }
 
 async function saveTitle() {
@@ -647,6 +922,10 @@ function bind() {
     if (act === "save-edit") return saveBranchEdit(id);
     if (act === "tag") return addTag(id);
     if (act === "branch") return showBranches(id);
+    if (act === "regen") {
+      await generateReply({ fromId: id });
+      return;
+    }
     if (act === "del") return deleteMsg(id);
   };
 
@@ -688,9 +967,30 @@ function bind() {
     input.style.height = Math.min(input.scrollHeight, 200) + "px";
   };
   input.onkeydown = (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); sendMessage(); }
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); sendMessage("ai"); }
   };
-  $("#btn-send").onclick = sendMessage;
+  $("#btn-send").onclick = () => sendMessage("ai");
+  $("#btn-send-only").onclick = () => sendMessage("save");
+  $("#btn-stop").onclick = stopStreaming;
+
+  $("#composer-provider").onchange = (e) => {
+    composerState.provider = e.target.value;
+    syncModelFromProvider(null);
+    savePrefs();
+    renderComposerSelects();
+    const p = currentProvider();
+    if (p && !p.configured) toast("该服务商未配置 Key，请点右上角 ⚙", 2600);
+  };
+  $("#composer-model").onchange = (e) => {
+    composerState.model = e.target.value;
+    savePrefs();
+    renderComposerSelects();
+  };
+  $("#composer-effort").onchange = (e) => {
+    composerState.effort = e.target.value;
+    savePrefs();
+    renderComposerSelects();
+  };
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
@@ -705,6 +1005,7 @@ function bind() {
   bind();
   await loadFolders();
   await loadConvs();
+  await loadComposerOptions().catch(() => { /* 离线时忽略 */ });
   if (state.convs.length) openConv(state.convs[0].id);
   const stats = await api("/api/stats").catch(() => null);
   if (stats) console.info("ChatTool", stats);

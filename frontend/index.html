@@ -87,14 +87,23 @@
         <div class="messages" id="messages"></div>
 
         <div class="composer">
-          <select id="composer-role">
-            <option value="user">用户</option>
-            <option value="assistant">助手</option>
-            <option value="system">系统</option>
-            <option value="tool">工具</option>
-          </select>
-          <textarea id="composer-input" rows="1" placeholder="输入一条消息… (Ctrl/⌘+Enter 发送)"></textarea>
-          <button class="btn primary" id="btn-send">发送</button>
+          <div class="composer-tools">
+            <select id="composer-provider" title="服务商"></select>
+            <select id="composer-model" title="模型"></select>
+            <select id="composer-effort" title="思考强度"></select>
+            <select id="composer-role" title="本条消息角色" class="role-select">
+              <option value="user">用户</option>
+              <option value="assistant">助手</option>
+              <option value="system">系统</option>
+              <option value="tool">工具</option>
+            </select>
+          </div>
+          <div class="composer-main">
+            <textarea id="composer-input" rows="1" placeholder="输入消息… (Ctrl/⌘+Enter 发送并请求回复)"></textarea>
+            <button class="btn primary" id="btn-send" title="发送并要求 AI 回复">发送</button>
+            <button class="btn ghost" id="btn-send-only" title="只保存消息，不请求回复">仅存</button>
+            <button class="btn ghost" id="btn-stop" hidden>停止</button>
+          </div>
         </div>
       </div>
     </main>

@@ -17,3 +17,6 @@ venv/
 .idea/
 *.swp
 .DS_Store
+
+# pdm（ProjectDevelopManager）本地存储
+.pdm/

@@ -99,6 +99,14 @@ def delete_conversation(conv_id: str) -> None:
         conn.execute("DELETE FROM conversation WHERE id=?", (conv_id,))
 
 
+def set_archived(conv_id: str, archived: bool) -> dict | None:
+    """归档或恢复会话。恢复后 updated_at 会刷新，方便在列表顶部找到。"""
+    with tx() as conn:
+        conn.execute("UPDATE conversation SET archived=? WHERE id=?",
+                     (1 if archived else 0, conv_id))
+    return get_conversation(conv_id)
+
+
 def touch(conn, conv_id: str) -> None:
     conn.execute("UPDATE conversation SET updated_at=? WHERE id=?", (now(), conv_id))
 

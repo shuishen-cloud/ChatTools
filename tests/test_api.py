@@ -869,8 +869,10 @@ class ChatToolTest(unittest.TestCase):
     def test_47_threadbar_not_collapsed_deadlock(self):
         """手机上不应默认收起且无入口打开（曾因按钮在面板内部而死锁）。"""
         js = self.client.get("/static/app.js").text
-        # 顶栏历史按钮必须绑定开关
-        self.assertIn('$("#btn-thread").onclick', js)
+        # 顶栏历史按钮必须绑定开关（现用安全绑定 on(sel, ev, fn)，两种写法都认）
+        self.assertTrue(
+            'on("#btn-thread", "click"' in js or '$("#btn-thread").onclick' in js,
+            "顶栏历史按钮没有绑定开关")
         # 桌面默认展开、手机默认收起
         self.assertIn("toggleThread(window.innerWidth > 760)", js)
         # .main 必须有 min-width:0，否则会把右栏挤出视口
@@ -1144,6 +1146,317 @@ class ChatToolTest(unittest.TestCase):
         self.assertEqual((detail["nodes"][0]["x"], detail["nodes"][0]["y"]), (300, 200))
         self.assertEqual(len(detail["edges"]), 1)
         self.assertEqual(e["label"], "指向")
+
+    # -------------------------------------------------- 归档必须可逆（用户报告：没有归档/删除）
+    def test_65_archive_is_reversible(self):
+        """归档后能从归档列表查到，恢复后回到会话列表。
+
+        修前：只能 PATCH archived=1，前端没有查看/恢复入口，
+        归档等于永久消失。
+        """
+        conv = self._post("/api/conversations", {"title": "可逆归档"})
+        cid = conv["id"]
+        self._post(f"/api/conversations/{cid}/messages",
+                   {"role": "user", "content": "正文"})
+
+        r = self.client.post(f"/api/conversations/{cid}/archive")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["data"]["archived"], 1)
+
+        active = [c["id"] for c in self.client.get("/api/conversations").json()["data"]]
+        archived = [c["id"] for c in
+                    self.client.get("/api/conversations?archived=1").json()["data"]]
+        self.assertNotIn(cid, active, "归档后不应出现在会话列表")
+        self.assertIn(cid, archived, "归档后必须能在归档列表找到")
+
+        # 恢复
+        r = self.client.delete(f"/api/conversations/{cid}/archive")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["data"]["archived"], 0)
+        active = [c["id"] for c in self.client.get("/api/conversations").json()["data"]]
+        archived = [c["id"] for c in
+                    self.client.get("/api/conversations?archived=1").json()["data"]]
+        self.assertIn(cid, active, "恢复后必须回到会话列表")
+        self.assertNotIn(cid, archived)
+
+    def test_66_archive_keeps_messages(self):
+        """归档只是标记，绝不能删掉消息——否则就成变相删除了。"""
+        conv = self._post("/api/conversations", {"title": "归档保内容"})
+        cid = conv["id"]
+        self._post(f"/api/conversations/{cid}/messages",
+                   {"role": "user", "content": "不能被带走"})
+        self.client.post(f"/api/conversations/{cid}/archive")
+        detail = self.client.get(f"/api/conversations/{cid}").json()["data"]
+        self.assertEqual(len(detail["messages"]), 1)
+        self.assertEqual(detail["messages"][0]["content"], "不能被带走")
+
+    def test_67_archive_missing_conversation_404(self):
+        r = self.client.post("/api/conversations/c_not_exist/archive")
+        self.assertEqual(r.status_code, 404)
+
+    def test_68_delete_removes_messages_and_links(self):
+        """删除会话：消息、文件夹关联都要一并消失，不流孤儿。"""
+        folder = self._post("/api/folders", {"name": "删除测试夹"})
+        conv = self._post("/api/conversations",
+                          {"title": "待删除", "folder_ids": [folder["id"]]})
+        cid = conv["id"]
+        self._post(f"/api/conversations/{cid}/messages",
+                   {"role": "user", "content": "将随会话消失"})
+
+        self.assertEqual(self.client.delete(f"/api/conversations/{cid}").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/conversations/{cid}").status_code, 404)
+        self.assertNotIn(cid, [c["id"] for c in
+                               self.client.get("/api/conversations").json()["data"]])
+        # 消息与文件夹关联不得残留（外键级联）
+        from app.db import db
+        with db() as conn:
+            left = conn.execute("SELECT COUNT(*) c FROM message WHERE conv_id=?",
+                                (cid,)).fetchone()["c"]
+            links = conn.execute("SELECT COUNT(*) c FROM conv_folder WHERE conv_id=?",
+                                 (cid,)).fetchone()["c"]
+        self.assertEqual(left, 0, "会话删了，消息不能残留")
+        self.assertEqual(links, 0, "会话删了，文件夹关联不能残留")
+        # 文件夹本身还在
+        self.assertIn(folder["id"], [f["id"] for f in
+                                    self.client.get("/api/folders").json()["data"]])
+
+    def test_69_ui_exposes_archive_and_delete_everywhere(self):
+        """手机上不能再把删除/归档按钮隐掉——这正是“没有删除和归档功”的原因。"""
+        css = self.client.get("/static/style.css").text
+        html = self.client.get("/").text
+        js = self.client.get("/static/app.js").text
+
+        # 旧样式：手机端直接 display:none 掉两个按钮
+        self.assertNotRegex(
+            css, r"#btn-del-conv\s*,\s*#btn-archive\s*\{\s*display\s*:\s*none",
+            "手机端不得隐藏删除/归档按钮")
+
+        # 侧栏必须有「归档」入口，否则归档后找不回来
+        self.assertIn('data-view="archive"', html)
+        self.assertIn('data-pane="archive"', html)
+        self.assertIn('id="archive-list"', html)
+
+        # 前端必须真的调用的归档/恢复接口
+        self.assertIn('/archive`, { method: "POST"', js)
+        self.assertIn('/archive`, { method: "DELETE"', js)
+
+        # 会话条目上的操作菜单（重命名/归档/删除）
+        self.assertIn('data-act="menu"', js)
+        for act in ('data-act="rename"', 'data-act="archive"', 'data-act="delete"'):
+            self.assertIn(act, js)
+
+    def test_69b_conv_menu_not_clipped_by_sidebar(self):
+        """会话操作菜单必须挂在 body 上。
+
+        手机端 .sidebar 有 transform + overflow:hidden，fixed 子元素会
+        相对侧栏定位并被裁掉，菜单等于看不见——归档/删除又“消失”一次。
+        """
+        html = self.client.get("/").text
+        js = self.client.get("/static/app.js").text
+        # 菜单节点在 body 顶层，而不是嵌在侧栏或顶栏里
+        self.assertIn('id="conv-more-menu"', html)
+        self.assertLess(html.index('id="conv-more-menu"'),
+                        html.index("</body>"))
+        # JS 里显式挪到 body
+        self.assertIn("document.body.appendChild(menu)", js)
+        self.assertIn('menu.parentElement !== document.body', js)
+
+    def test_69c_bind_survives_missing_elements(self):
+        """bind() 里不得出现会让整个函数崩溃的硬赋值。
+
+        真实事故：浏览器缓存了旧 index.html（缺少本轮新增的元素），
+        而 app.js 是新版，`$("#btn-empty-archive").onclick = ...` 抛
+        TypeError 把 bind() 打断在中间，导致删除、归档、发送、切换
+        会话全部失效——按钮点了没反应。元素缺失只能少一个功能，
+        不能让整个应用报废。
+        """
+        js = self.client.get("/static/app.js").text
+        start = js.index("function bind() {")
+        end = js.index("\n}\n", start)
+        body = js[start:end]
+        import re
+        # bind() 里不允许再出现 $("...").onclick/oninput/... = 这样的裸赋值
+        bad = re.findall(r'\$\("#[\w-]+"\)\.(?:onclick|oninput|onkeydown|onchange|onblur)\s*=', body)
+        self.assertEqual(bad, [], f"bind() 里仍有裸赋值，元素缺失会中断全部绑定: {bad}")
+        # 必须有安全绑定辅助
+        self.assertIn("function on(sel, ev, fn", js)
+        self.assertIn("\u627e\u4e0d\u5230", js)  # 找不到时只 warn
+        # 每个功能区都要包在 guard 里
+        self.assertGreaterEqual(body.count('guard("'), 8, "绑定应分组容错")
+
+    def test_70_archive_endpoint_registered(self):
+        """路由确实注册了 POST/DELETE 两种方法。"""
+        conv = self._post("/api/conversations", {"title": "路由检查"})
+        cid = conv["id"]
+        self.assertNotEqual(self.client.put(f"/api/conversations/{cid}/archive").status_code, 200)
+        self.assertEqual(self.client.post(f"/api/conversations/{cid}/archive").status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/conversations/{cid}/archive").status_code, 200)
+
+    # -------------------------------------------------- 分享到 draw
+    def test_71_share_favorites_to_draw(self):
+        """收藏可打包成 draw 画布格式：字段必须与 draw importCanvasData 对齐。"""
+        conv = self._post("/api/conversations", {"title": "分享测试"})
+        cid = conv["id"]
+        m = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "assistant", "content": "一段值得画出来的结论"})
+        self.client.patch(f"/api/messages/{m['id']}", json={"favorite": True})
+        self._post(f"/api/messages/{m['id']}/tags", {"name": "结论"})
+
+        data = self.client.get("/api/favorites/draw").json()["data"]
+        # draw 只认这个 format 字符串
+        self.assertEqual(data["format"], "mutiplechat-canvas")
+        self.assertEqual(data["version"], 1)
+        self.assertEqual(data["generator"], "ChatTool")
+        self.assertEqual(set(data), {"format", "version", "generator", "view",
+                                     "nodes", "edges", "zones", "tasks", "draw_cards"})
+        node = next(n for n in data["nodes"] if "一段值得画出来的结论" in n["text"])
+        # 节点字段与 draw createNode/importCanvasData 完全一致
+        self.assertEqual(set(node), {"id", "kind", "title", "x", "y", "w", "h",
+                                     "text", "src", "prompt", "zoneId", "level"})
+        self.assertEqual(node["kind"], "doc")
+        self.assertIn("分享测试", node["text"])
+        self.assertIn("结论", node["text"])
+
+        card = next(c for c in data["draw_cards"] if c["nodeId"] == node["id"])
+        self.assertEqual(card["messageId"], m["id"])
+        self.assertEqual(card["convTitle"], "分享测试")
+        self.assertEqual(card["tags"], ["结论"])
+        self.assertEqual(card["source"], "chattool")
+
+    def test_72_share_selected_favorites_only(self):
+        """POST {ids} 只导出选中的收藏。"""
+        conv = self._post("/api/conversations", {"title": "选择性分享"})
+        cid = conv["id"]
+        a = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "user", "content": "只分享这一条甲"})
+        b = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "user", "content": "不要分享这一条乙"})
+        for mid in (a["id"], b["id"]):
+            self.client.patch(f"/api/messages/{mid}", json={"favorite": True})
+
+        res = self.client.post("/api/favorites/draw", json={"ids": [a["id"]]}).json()
+        nodes = res["data"]["nodes"]
+        self.assertEqual(len(nodes), 1)
+        self.assertIn("这一条甲", nodes[0]["text"])
+        self.assertNotIn("这一条乙", nodes[0]["text"])
+
+    def test_73_share_draw_downloads_as_file(self):
+        """下载版返回附件头，中文文件名按 RFC 5987 编码。"""
+        conv = self._post("/api/conversations", {"title": "下载分享"})
+        cid = conv["id"]
+        m = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "user", "content": "下载用收藏"})
+        self.client.patch(f"/api/messages/{m['id']}", json={"favorite": True})
+        r = self.client.get("/api/favorites/draw.json")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("application/json", r.headers["content-type"])
+        disp = r.headers["content-disposition"]
+        self.assertIn("attachment", disp)
+        self.assertIn("chattool-favorites-", disp)
+        payload = r.json()
+        self.assertEqual(payload["format"], "mutiplechat-canvas")
+        self.assertTrue(payload["draw_cards"])
+
+    def test_74_share_draw_escapes_hostile_content(self):
+        """内容里的 HTML/引号不能破坏 JSON 结构（draw 侧会 escapeHtml 渲染）。"""
+        conv = self._post("/api/conversations", {"title": "危险 <标题> & \"引号\""})
+        cid = conv["id"]
+        m = self._post(f"/api/conversations/{cid}/messages",
+                       {"role": "assistant",
+                        "content": "<script>alert(1)</script> \"双引号\" & 反斜杠 \\"})
+        self.client.patch(f"/api/messages/{m['id']}", json={"favorite": True})
+        data = self.client.get("/api/favorites/draw").json()["data"]
+        node = next(n for n in data["nodes"] if "<script>" in n["text"])
+        self.assertIn("<script>alert(1)</script>", node["text"])   # 原样保留，由前端转义
+        self.assertIn("&", node["text"])
+
+    def test_75_draw_import_contract_matches_draw_project(self):
+        """锁定契约：ChatTool 导出的字段名必须出现在 draw 的导入/建节点代码里。"""
+        from pathlib import Path
+        draw = Path(__file__).resolve().parents[2] / "draw"
+        if not draw.exists():
+            self.skipTest("未找到上层 draw 项目")
+        io2 = (draw / "js" / "io2.js").read_text(encoding="utf-8")
+        nodes = (draw / "js" / "nodes.js").read_text(encoding="utf-8")
+        vault = (draw / "js" / "vault.js").read_text(encoding="utf-8")
+        self.assertIn("mutiplechat-canvas", io2)
+        for field in ("title", "x", "y", "w", "h", "text", "src", "prompt",
+                      "zoneId", "level"):
+            self.assertIn(field, nodes, f"draw createNode 缺少字段 {field}")
+        # draw 必须有收藏机制，并能吃下我们导出的 draw_cards
+        self.assertIn("draw_cards", vault)
+        self.assertIn("ingestDrawCards", vault)
+
+
+    # -------------------------------------------------- 给 draw 的 CORS
+    def _fav_one(self):
+        conv = self._post("/api/conversations", {"title": "CORS 测试"})
+        m = self._post(f"/api/conversations/{conv['id']}/messages",
+                       {"role": "user", "content": "跨源同步用"})
+        self.client.patch(f"/api/messages/{m['id']}", json={"favorite": True})
+        return m
+
+    def test_76_cors_allows_local_draw_origin(self):
+        """draw（本机 8090）跨源读收藏必须有 CORS 头，否则浏览器拦截。"""
+        self._fav_one()
+        r = self.client.get("/api/favorites/draw",
+                            headers={"Origin": "http://127.0.0.1:8090"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers.get("access-control-allow-origin"),
+                         "http://127.0.0.1:8090")
+        self.assertEqual(r.headers.get("vary"), "origin")
+
+    def test_77_cors_accepts_any_local_port(self):
+        """draw 换端口不该需要改代码。"""
+        self._fav_one()
+        for origin in ("http://127.0.0.1:9999", "http://localhost:8090",
+                       "http://localhost:1234", "http://[::1]:8090"):
+            r = self.client.get("/api/favorites/draw", headers={"Origin": origin})
+            self.assertEqual(r.headers.get("access-control-allow-origin"), origin,
+                             f"{origin} 应被放行")
+
+    def test_78_cors_rejects_foreign_origin(self):
+        """外部网站不得跨源读取收藏。"""
+        self._fav_one()
+        for origin in ("http://evil.example.com", "https://evil.example.com",
+                       "http://127.0.0.1.evil.com:8090"):
+            r = self.client.get("/api/favorites/draw", headers={"Origin": origin})
+            self.assertIsNone(r.headers.get("access-control-allow-origin"),
+                              f"{origin} 不该拿到 CORS 头")
+
+    def test_79_cors_does_not_leak_sensitive_endpoints(self):
+        """设置/Key 类接口哪怕是本机源也不开 CORS —— 防止恶意页面偷 Key。"""
+        for path in ("/api/llm/status", "/api/settings", "/api/conversations",
+                     "/api/stats"):
+            r = self.client.get(path, headers={"Origin": "http://127.0.0.1:8090"})
+            self.assertIsNone(r.headers.get("access-control-allow-origin"),
+                              f"{path} 不该开放 CORS")
+
+    def test_80_cors_preflight_ok(self):
+        """预检请求直接 204，且带完整 allow 头。"""
+        r = self.client.options("/api/favorites/draw",
+                                headers={"Origin": "http://127.0.0.1:8090"})
+        self.assertEqual(r.status_code, 204)
+        self.assertEqual(r.headers.get("access-control-allow-origin"),
+                         "http://127.0.0.1:8090")
+        self.assertIn("GET", r.headers.get("access-control-allow-methods", ""))
+
+    def test_81_cors_simple_get_needs_no_preflight(self):
+        """draw 用 GET 简单请求拉收藏，不该依赖预检（少一个往返）。"""
+        import re
+        from pathlib import Path
+        draw = Path(__file__).resolve().parents[2] / "draw"
+        if not draw.exists():
+            self.skipTest("未找到上层 draw 项目")
+        vault = (draw / "js" / "vault.js").read_text(encoding="utf-8")
+        m = re.search(r"fetch\(`\$\{base\}/api/favorites/draw`,\s*\{([^}]*)\}",
+                      vault)
+        self.assertIsNotNone(m, "draw 应从 /api/favorites/draw 拉取")
+        opts = m.group(1)
+        self.assertIn("GET", opts)
+        for h in ("Authorization", "X-Custom", "headers"):
+            self.assertNotIn(h, opts, f"简单请求不该带 {h}（会触发预检）")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

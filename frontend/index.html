@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>ChatTool · 对话脉络管理</title>
 <link rel="stylesheet" href="/static/style.css">
+<!-- 主题预置：在首帧之前定好白天/黑夜，避免闪白（脚本失败时保持默认夜间） -->
+<script>
+(function () {
+  try {
+    var saved = localStorage.getItem("chattool.theme") || "auto";
+    var dark = saved === "dark" || (saved === "auto" &&
+      !window.matchMedia("(prefers-color-scheme: light)").matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    document.documentElement.dataset.themeMode = saved;
+  } catch (e) { document.documentElement.dataset.theme = "dark"; }
+})();
+</script>
 </head>
 <body>
 <div id="app">
@@ -17,6 +29,17 @@
     <button class="btn primary" id="btn-new">＋ 新会话</button>
     <button class="btn ghost" id="btn-board" title="画板">画板</button>
     <button class="btn ghost" id="btn-thread" title="对话历史">历史</button>
+    <span class="theme-wrap">
+      <button class="btn ghost theme-btn" id="btn-theme" title="白天 / 黑夜模式"
+              aria-label="切换白天黑夜模式" aria-haspopup="true" aria-expanded="false">
+        <span class="ico" id="btn-theme-ico">🌙</span>
+      </button>
+      <div class="theme-menu" id="theme-menu" role="menu">
+        <button data-theme-mode="auto" role="menuitem"><span>🖥</span>跟随系统</button>
+        <button data-theme-mode="light" role="menuitem"><span>☀️</span>白天</button>
+        <button data-theme-mode="dark" role="menuitem"><span>🌙</span>黑夜</button>
+      </div>
+    </span>
     <button class="icon-btn" id="btn-settings" title="设置" aria-label="设置"
             style="display:block">⚙</button>
   </header>
@@ -28,6 +51,7 @@
         <button class="tab active" data-view="conversations">会话</button>
         <button class="tab" data-view="folders">文件夹</button>
         <button class="tab" data-view="favorites">收藏</button>
+        <button class="tab" data-view="archive">归档</button>
       </nav>
 
       <section class="pane active" data-pane="conversations">
@@ -36,6 +60,16 @@
           <button class="mini" id="btn-clear-scope" hidden>清除筛选</button>
         </div>
         <div id="conv-list" class="conv-list"></div>
+        <p class="hint">长按会话（或点 ⋯）可重命名、归档、删除。</p>
+      </section>
+
+      <section class="pane" data-pane="archive">
+        <div class="pane-head">
+          <span>已归档</span>
+          <button class="mini" id="btn-empty-archive" hidden>清空</button>
+        </div>
+        <div id="archive-list" class="conv-list"></div>
+        <p class="hint">归档的会话不再出现在会话列表，可随时恢复。</p>
       </section>
 
       <section class="pane" data-pane="folders">
@@ -48,7 +82,11 @@
       </section>
 
       <section class="pane" data-pane="favorites">
-        <div class="pane-head"><span>收藏的消息</span></div>
+        <div class="pane-head">
+          <span>收藏的消息</span>
+          <button class="ghost mini" id="btn-fav-draw"
+                  title="把收藏打包成 draw 画布 JSON，可导入绘图软件作为卡片">🎨 分享到 draw</button>
+        </div>
         <div id="fav-list" class="fav-list"></div>
       </section>
     </aside>
@@ -77,6 +115,9 @@
               </div>
             </div>
             <button class="btn danger ghost" id="btn-del-conv">删除</button>
+            <button class="btn ghost conv-more-hide-sm" id="btn-conv-more"
+                    title="更多操作（重命名 / 归档 / 删除）"
+                    aria-label="更多操作" aria-haspopup="true" aria-expanded="false">⋯</button>
           </div>
         </div>
 
@@ -203,6 +244,9 @@
 </div>
 
 <div id="toast" class="toast" hidden></div>
+<!-- 会话操作菜单：挂在 body 上，避免被侧栏的 overflow / transform 裁掉 -->
+<div class="menu conv-menu" id="conv-more-menu" role="menu"></div>
+<script src="/static/theme.js"></script>
 <script src="/static/markdown.js"></script>
 <script src="/static/panels.js"></script>
 <script src="/static/app.js"></script>

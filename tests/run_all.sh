@@ -13,3 +13,8 @@ node tests/markdown.test.js
 echo
 echo "===== CSS hidden 层叠检查 ====="
 node tests/css_hidden.test.js
+echo
+echo "===== 白天/黑夜主题检查 ====="
+node tests/theme.test.js
+echo
+node tests/theme_logic.test.js

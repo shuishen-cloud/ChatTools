@@ -571,6 +571,20 @@ const Board = (() => {
   const NODE_W = 232;
   const NODE_H = 130;   // 估算高度，用于连线锚点
 
+  /* 画板 SVG 用内联颜色（SVG 属性无法写 var()），
+     所以从 CSS 变量里读出当前主题的色值，换肤后重绘即生效 */
+  function skin() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (name, fallback) => (cs.getPropertyValue(name).trim() || fallback);
+    return {
+      accent: v("--acc", "#6b8afd"),
+      edge: v("--edge", "#5b6b8f"),
+      port: v("--port", "#5b6b8f"),
+      labelBg: v("--edge-label-bg", "#171a23"),
+      labelLine: v("--edge-label-line", "#2b3243"),
+    };
+  }
+
   async function open() {
     $("#boardview").hidden = false;
     await loadBoards();
@@ -813,7 +827,7 @@ const Board = (() => {
       ? toCanvas(portRect.left + portRect.width / 2, portRect.top + portRect.height / 2)
       : { x: from.x + NODE_W, y: from.y + 24 };
     const ghost = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    ghost.setAttribute("stroke", "#6b8afd");
+    ghost.setAttribute("stroke", skin().accent);
     ghost.setAttribute("stroke-width", "2");
     ghost.setAttribute("stroke-dasharray", "5 4");
     ghost.setAttribute("fill", "none");
@@ -901,13 +915,14 @@ const Board = (() => {
     const svg = $("#board-svg");
     if (!state.board) { svg.innerHTML = ""; return; }
     const byId = Object.fromEntries((state.board.nodes || []).map((n) => [n.id, n]));
+    const sk = skin();
     const parts = [];
 
     // 箭头标记
     parts.push(`<defs>
       <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
               markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#5b6b8f"/>
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="${sk.edge}"/>
       </marker></defs>`);
 
     for (const e of state.board.edges || []) {
@@ -923,14 +938,14 @@ const Board = (() => {
       const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
       const dash = e.style === "dashed" ? ' stroke-dasharray="6 4"' : "";
       parts.push(`<path class="edge-hit" d="${d}" data-edge="${e.id}"></path>`);
-      parts.push(`<path d="${d}" fill="none" stroke="#5b6b8f" stroke-width="1.6"
+      parts.push(`<path d="${d}" fill="none" stroke="${sk.edge}" stroke-width="1.6"
         marker-end="url(#arrow)"${dash}></path>`);
       if (e.label) {
         const mx = (x1 + x2) / 2;
         const my = (y1 + y2) / 2 - 6;
         parts.push(`<rect x="${mx - e.label.length * 3.6 - 5}" y="${my - 11}"
           width="${e.label.length * 7.2 + 10}" height="17" rx="8"
-          fill="#171a23" stroke="#2b3243"></rect>`);
+          fill="${sk.labelBg}" stroke="${sk.labelLine}"></rect>`);
         parts.push(`<text class="edge-label" x="${mx}" y="${my + 1}"
           text-anchor="middle">${esc(e.label)}</text>`);
       }
@@ -1056,5 +1071,10 @@ const Board = (() => {
     });
   }
 
-  return { bind, open, close, addMessage, addText, loadBoards };
+  /** 换肤后重绘连线，让 SVG 里的内联颜色跟上主题 */
+  function refresh() {
+    if (state.board) renderEdges();
+  }
+
+  return { bind, open, close, addMessage, addText, loadBoards, refresh };
 })();

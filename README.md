@@ -14,7 +14,9 @@
 | **导出** | Markdown / 独立 HTML / JSON / 纯文本；支持「仅导出当前分支」；中文文件名按 RFC 5987 编码 |
 | **分享** | 一键生成只读链接 `/s/<token>`，纯 HTML 页面，未登录可直接看；可撤销 |
 | **导入** | ChatTool 自有 JSON 回流；直接解析 **Pi** 会话导出；宽松解析其他 `{messages:[...]}` 结构 |
+| **会话归档 / 删除** | 会话条目点 ⋯（或长按 / 右键）即可重命名、归档、删除；侧栏「归档」页可查看与恢复，手机端同样可用 |
 | **移动优先** | 单页无构建、响应式；Termux / 手机浏览器可用 |
+| **白天 / 黑夜模式** | 顶栏 ☀️/🌙 一键切换，可选「跟随系统」；选择存本地，首帧即生效不闪白 |
 | **API Key 设置** | 右上角 ⚙ 打开设置，支持 **DeepSeek** / Anthropic / OpenAI 兼容；存服务端、只回显尾 4 位；可测连接 |
 | **真对话生成** | 底部输入框发送后**流式请求 AI 回复**并落库；可中途停止；失败会记录错误而非丢消息 |
 | **服务商 / 模型 / 思考强度切换** | 聊天框底部三个下拉：服务商、模型、思考档位（关/低/中/高），选择本地记忆 |
@@ -23,6 +25,99 @@
 | **右侧历史快速切换** | 右栏把消息树渲染成脉络，与滚动双向联动，可折叠分支、一键跳转 |
 | **悬浮提问窗** | 选中任何文字浮现「💬 就此提问」，弹出**可拖动的悬浮窗**；回答可一键加入画板 |
 | **提示词画板** | 把任意会话的消息「＋ 画板」，在画布上拖拽布局、连线写出关系，可导出 Markdown |
+| **分享到 draw** | 收藏**直接从 ChatTool 同步**进 draw（CORS + fetch，无需导文件）；也保留导出 JSON 兜底 |
+
+## 一次“按钮全都没反应”的事故
+
+**症状**：更新之后删除卡顿且没反应、发消息没有回复、切换不了会话。
+
+**根因**：`bind()` 里原本全是 `$("#id").onclick = ...` 这样的硬赋值。
+
+```js
+function bind() {
+  MD.bindCopy(document.body);
+  $("#btn-menu").onclick = ...;     // 只要前面任何一个元素缺失
+  $("#btn-empty-archive").onclick = ...;  // ← 编辑器选一个，整个函数就崩在这里
+  // ↓ 后面全部不执行：删除、归档、发送、切换会话、快捷键……
+}
+```
+
+浏览器缓存了旧版 `index.html`（缺本轮新增的元素），`app.js` 却是新版，
+`$("#btn-empty-archive")` 返回 `null`，赋值抛 `TypeError`，
+**`bind()` 中断在第一半，后面的事件一个都没绑上**。
+界面上看就是“点了没反应”，而不是报错——所以很难猜。
+
+**三处修复**：
+
+1. **安全绑定**：新增 `on(sel, ev, fn)`，元素缺失只 `console.warn` 并跳过。
+   整个 `bind()` 拆成 12 个 `guard("分组名", fn)`，任一组出错只影响该组。
+   元素缺失只应少一个功能，不该让整个应用报废。
+2. **缓存头**：`StaticFiles` 默认不发 `Cache-Control`，浏览器按启发式规则
+   长期缓存 JS。现在给 `/` 和 `/static/*` 加 `no-cache` + ETag
+   （每次都回来验证，没变就 304，不浪费流量），避免新旧版本混用。
+3. **禁止回归**：`test_69c` 扫描 `bind()` 函数体，**断言里面不得再出现
+   任何 `$("#x").onclick = ` 裸赋值**，并要求至少 8 个 `guard` 分组。
+
+验证方式：用 jsdom 把「旧 HTML + 新 JS」拼起来跑，修复前输出
+`启动失败（绑定事件）：Cannot set properties of null (setting 'onclick')`，
+修复后无错误，且切换会话 / 归档 / 恢复全部通过。
+
+## 会话的归档与删除
+
+会话条目右侧有 **⋯**（手机上常显、桌面 hover 出现），也可以**长按**（触屏）或**右键**：
+重命名 / 归类到文件夹 / 归档 / 删除。顶栏的 ⋯ 作用于当前会话。
+
+侧栏第四个标签 **归档** 列出所有已归档会话，可单个恢复，也可「清空」批量删除。
+
+| 接口 | 语义 |
+|---|---|
+| `POST /api/conversations/{id}/archive` | 归档（只置标记，**不动消息**） |
+| `DELETE /api/conversations/{id}/archive` | 恢复，回到会话列表 |
+| `DELETE /api/conversations/{id}` | 彻底删除，外键级联清掉消息与文件夹关联 |
+
+### 两个踩过的坑
+
+1. **手机端把按钮 `display:none` 掉了**：旧 CSS 里有
+   `@media (max-width:760px){ #btn-del-conv, #btn-archive { display:none } }`，
+   于是手机上根本删不掉会话。现在删除/归档都收敛进 ⋯ 菜单，
+   测试 `test_69` 会断言这行样式不得回归。
+2. **菜单被侧栏裁掉**：手机端 `.sidebar` 带 `transform: translateX(-100%)`
+   且有 `overflow: hidden`——`transform` 让侧栏成为 `position: fixed`
+   的包含块，菜单被裁得只剩一条边。所以菜单节点放在 `<body>` 下，
+   JS 里用 `appendChild` + `getBoundingClientRect()` 贴到触发元素旁。
+   测试 `test_69b` 锁住这一点。
+
+归档早期只有「进入」没有「出去」：后端能查 `archived=1`，前端却没有入口，
+按一下归档会话就永久消失。现在归档必须可逆，`test_65/66` 断言
+「归档后能查到、恢复后回列表、消息一条不少」。
+
+## 白天 / 黑夜模式
+
+顶栏「🌙 / ☀️」按钮一键在白天与黑夜之间切换；**右键 / 长按**该按钮可打开三态菜单：
+
+| 模式 | 说明 |
+|---|---|
+| 跟随系统（默认） | 读 `prefers-color-scheme`，系统切深色时页面自动跟随 |
+| 白天 | 强制浅色 |
+| 黑夜 | 强制深色（原有外观） |
+
+快捷键 `Ctrl/⌘ + Shift + L`。选择存在 `localStorage["chattool.theme"]`。
+
+### 实现要点
+
+1. **变量化**：CSS 顶部 `:root` 定义黑夜全部颜色，`html[data-theme="light"]` 覆盖为白天；
+   切换主题只是改 `<html data-theme>`，无 JS 重绘。几何参数（`--radius`）不参与换肤。
+2. **不闪白**：`index.html` 的 `<head>` 内联一段脚本，在首帧渲染前就定好 `data-theme`——
+   否则「跟随系统 + 系统为日间」时会先黑一下再变白。
+3. **正文零硬编码色**：所有十六进制色收进变量（含 `--ok-bg` / `--err-line` 这类语义色），
+   否则浅色主题下会出现深色残留。`tests/theme.test.js` 会扫描正文并断言"两套主题定义了同一组变量"。
+4. **SVG 例外**：画板连线的颜色写在 SVG 属性里，`var()` 无效，所以 `panels.js` 的 `skin()`
+   从 `getComputedStyle` 读当前主题色值，换肤后调 `Board.refresh()` 重绘连线。
+5. **系统 UI 跟随**：切主题时同步更新 `color-scheme` 与 `theme-color`，
+   手机浏览器状态栏 / 表单控件（select、滚动条）也会变成对应明暗。
+
+测试 `tests/theme_logic.test.js` 用最小 DOM 打桩跑 `theme.js`，锁住
+「auto 跟随系统 / 显式指定 / 一键切换」三种行为。
 
 ## 设计原则：先对话，再组织
 
@@ -142,6 +237,65 @@ HTML 的 `hidden` 属性只是 UA 样式表里的 `display: none`，
 
 接口：`/api/boards`、`/api/boards/{id}/nodes`、`/api/boards/{id}/edges`。
 
+### 分享收藏到 draw
+
+上层的绘图软件 [`../draw`](../draw)（`node server.js`，默认 8090）是个画布型工具：
+节点卡片 + 连线。ChatTool 的收藏可以直接流过去。
+
+**链路**：收藏 → 导出 `mutiplechat-canvas` JSON → draw「⭐ 导入收藏」→ 卡片入库并可插入画布。
+
+| 接口 | 作用 |
+|---|---|
+| `GET /api/favorites/draw` | 全部收藏打包成 draw 画布数据 |
+| `POST /api/favorites/draw` `{ids:[...]}` | 只打包选中的收藏 |
+| `GET /api/favorites/draw.json` | 同上，直接下载 `.json` 附件 |
+
+**两种同步方式**
+
+| 方式 | 操作 | 适用 |
+|---|---|---|
+| **直接同步**（推荐） | draw 里点「⭐ 同步收藏」或收藏面板「同步」 | 两台服务同机运行，一键、无文件 |
+| 导出文件（兜底） | ChatTool「🎨 分享到 draw」→ draw「📁 导入收藏文件」 | draw 不在同机，或 ChatTool 没启动 |
+
+draw 默认请求 `http://127.0.0.1:8765`。换端口/换机器时在 draw 控制台改一次：
+
+```js
+localStorage.setItem('chattool_url', 'http://192.168.1.5:8765')
+```
+
+**CORS 只开一条口子**
+
+`FavoriteShareCors` 中间件只给 `/api/favorites/draw*` 加 CORS 头，且只放行本机来源
+（`127.0.0.1` / `localhost` / `[::1]` 的任意端口）。
+
+**没有做成全局 `allow_origins=['*']`**：`/api/settings`、`/api/llm/status` 这些接口能读写
+API Key，全局放开等于让用户随便点开的恶意网页把自己的 Key fetch 走。当前哪怕从本机源
+访问这些接口也不会带 CORS 头（`test_79` 锁定）。需要额外放行时用环境变量：
+
+```bash
+CHATTOOL_CORS_ORIGINS=http://192.168.1.5:8090 python3 -m app
+```
+
+draw 用 **GET 简单请求**（不带自定义头），浏览器不会发预检，少一个往返（`test_81` 锁定）。
+同步失败一律静默 toast，不会弹窗打断——ChatTool 没启动不该让绘图变卡。
+
+**格式契约**（与 draw 的 `exportCanvasData` 一致，两边共用同一份结构）：
+
+```json
+{ "format": "mutiplechat-canvas", "version": 1, "generator": "ChatTool",
+  "view": {...}, "nodes": [...], "edges": [], "zones": [], "tasks": [],
+  "draw_cards": [ { "nodeId": "n1", "messageId": "m_x", "convTitle": "...",
+                    "role": "assistant", "tags": ["原理"], "source": "chattool" } ] }
+```
+
+- `nodes[*]` 的字段严格对齐 draw 的 `createNode`：`kind/title/x/y/w/h/text/src/prompt/zoneId/level`
+- `draw_cards` 是给 draw 收藏库的元信息（消息 id、来源会话、标签）；`from = messageId`，
+  因此**重复导入不会产生重复卡片**
+- 卡片正文是带来源头的 Markdown（角色 / 来源会话 / 标签 / 收藏时间 + 原文）
+
+`test_71`～`test_75` 锁定了这份契约，其中 `test_75` 会直接读 `../draw` 的源码，
+校验字段名与 `draw_cards` 处理逻辑仍然存在——任一侧改了格式都会红。
+
 ## API Key 设置
 
 点右上角 **⚙** 打开设置窗口：
@@ -209,7 +363,7 @@ node tests/markdown.test.js           # 前端 Markdown 渲染器（200 断言�
 node tests/css_hidden.test.js         # CSS hidden 层叠检查
 ```
 
-覆盖：会话 CRUD、多对多文件夹、分支生成与兄弟计数、收藏/标签、级联删除、
+覆盖：会话 CRUD、多对多文件夹、分支生成与兄弟计数、收藏/标签、分享到 draw 的格式契约与 CORS 边界、级联删除、
 四种导出、分享链接与撤销、JSON 往返导入、Pi 格式导入、搜索/统计/归档、
 流式生成与分支上下文隔离、思考强度降级、右侧历史树、悬浮提问、
 画板节点/连线/导出、API Key 不泄漏、启动契约与 CSS 层叠回归。

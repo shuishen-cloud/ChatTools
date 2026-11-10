@@ -255,3 +255,93 @@ def list_snippets(conv_id: str) -> list[dict]:
 def delete_snippet(snippet_id: str) -> None:
     with tx() as conn:
         conn.execute("DELETE FROM snippet_qa WHERE id=?", (snippet_id,))
+
+
+# ---------------------------------------------------------------- 分享到 draw
+# 与 draw 项目（上层 ../draw）的 exportCanvasData 格式保持一致：
+#   { format:'mutiplechat-canvas', version:1, view, nodes[], edges[], zones[], tasks[] }
+# 这样 draw 的「⬆ 导入」可以直接吃下这个 JSON。
+# 额外携带 draw_cards 元信息（来源、标签、收藏时间），draw 侧收藏时使用。
+
+DRAW_COLS = 3          # 卡片自动排布：每行几列
+CARD_W, CARD_H = 300, 160
+CARD_GAP_X, CARD_GAP_Y = 60, 60
+ORIGIN_X, ORIGIN_Y = 160, 160
+
+
+def _card_text(msg: dict) -> str:
+    """卡片正文：干净的 Markdown，带来源信息。"""
+    content = (msg.get("content") or "").strip()
+    tags = msg.get("tags") or []
+    head = []
+    if msg.get("role"):
+        head.append(f"> 角色：{msg['role']}")
+    if msg.get("conv_title"):
+        head.append(f"> 来源：《{msg['conv_title']}》")
+    if tags:
+        head.append(f"> 标签：{'、'.join(tags)}")
+    if msg.get("created_at"):
+        head.append(f"> 收藏自 ChatTool · {msg['created_at']}")
+    return "\n".join(head + ([""] if head else []) + [content])
+
+
+def favorites_to_draw(names: list[str] | None = None) -> dict:
+    """把收藏的消息打包成 draw 画布数据。
+
+    names: 可选，仅导出这些 message_id；为空则导出全部收藏。
+    """
+    favs = _list_favorites_raw()
+    if names:
+        wanted = set(names)
+        favs = [m for m in favs if m["id"] in wanted]
+    nodes = []
+    draw_cards = []
+    for idx, m in enumerate(favs):
+        nid = f"n{idx + 1}"
+        title = (m.get("conv_title") or "收藏").strip()
+        snippet = (m.get("content") or "").strip().replace("\n", " ")
+        if snippet:
+            title = f"{title} · {snippet[:18]}{'…' if len(snippet) > 18 else ''}"
+        x = ORIGIN_X + (idx % DRAW_COLS) * (CARD_W + CARD_GAP_X)
+        y = ORIGIN_Y + (idx // DRAW_COLS) * (CARD_H + CARD_GAP_Y)
+        nodes.append({
+            "id": nid, "kind": "doc", "title": title,
+            "x": x, "y": y, "w": CARD_W, "h": CARD_H,
+            "text": _card_text(m), "src": "", "prompt": "",
+            "zoneId": None, "level": 1,
+        })
+        draw_cards.append({
+            "nodeId": nid,
+            "messageId": m["id"],
+            "convId": m.get("conv_id"),
+            "convTitle": m.get("conv_title") or "",
+            "role": m.get("role") or "",
+            "tags": m.get("tags") or [],
+            "favoriteAt": m.get("created_at") or "",
+            "source": "chattool",
+        })
+    return {
+        "format": "mutiplechat-canvas",
+        "version": 1,
+        "generator": "ChatTool",
+        "view": {"x": 0, "y": 0, "scale": 1},
+        "nodes": nodes,
+        "edges": [],
+        "zones": [],
+        "tasks": [],
+        "draw_cards": draw_cards,
+    }
+
+
+def _list_favorites_raw() -> list[dict]:
+    """收藏消息（含会话标题与技术字段），供分享使用。"""
+    with db() as conn:
+        out = []
+        for r in conn.execute(
+                "SELECT m.*, c.title AS conv_title FROM message m "
+                "JOIN conversation c ON c.id=m.conv_id "
+                "WHERE m.favorite=1 ORDER BY m.created_at DESC"):
+            d = row_to_dict(r)
+            d["tags"] = [t for t in (d.get("tags") or "").split(",") if t]
+            out.append(d)
+        return out

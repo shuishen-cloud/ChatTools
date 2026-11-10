@@ -8,6 +8,8 @@ from starlette.applications import Starlette
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from starlette.middleware import Middleware
+from starlette.datastructures import MutableHeaders
 
 from . import boards as B
 from . import conversations as C
@@ -64,6 +66,21 @@ async def api_conv_update(request):
     body = await read_json(request)
     conv = C.update_conversation(conv_id, body)
     return ok(conv) if conv else err("会话不存在", 404)
+
+
+async def api_conv_archive(request):
+    """归档 / 恢复会话。
+
+    POST   -> 归档
+    DELETE -> 恢复（取消归档）
+    比前端自己传 archived=0/1 更直白，也便于将来挂自动归档。
+    """
+    conv_id = request.path_params["conv_id"]
+    archived = 0 if request.method == "DELETE" else 1
+    conv = C.set_archived(conv_id, archived)
+    if not conv:
+        return err("会话不存在", 404)
+    return ok(conv)
 
 
 async def api_conv_delete(request):
@@ -405,6 +422,38 @@ async def api_board_export(request):
                         f"{board['name'] or 'board'}.md")})
 
 
+async def api_favorites_share_draw(request):
+    """把收藏（全部或指定若干条）打包成 draw 画布数据。
+
+    GET  /api/favorites/draw            -> 全部收藏
+    POST /api/favorites/draw  {ids:[]}  -> 仅指定消息
+    返回可直接喂给 draw「⬆ 导入」的 JSON（也带 draw_cards 元信息）。
+    """
+    if request.method == "POST":
+        body = await read_json(request)
+        ids = body.get("ids") or None
+    else:
+        raw = request.query_params.get("ids") or ""
+        ids = [x for x in raw.split(",") if x] or None
+    data = B.favorites_to_draw(ids)
+    if not data["nodes"]:
+        return err("没有可分享的收藏")
+    return ok(data)
+
+
+async def api_favorites_share_draw_file(request):
+    """同上下载版：直接给出 .json 文件，方便拖进 draw。"""
+    raw = request.query_params.get("ids") or ""
+    ids = [x for x in raw.split(",") if x] or None
+    data = B.favorites_to_draw(ids)
+    stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M")
+    return Response(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": content_disposition(
+            f"chattool-favorites-{stamp}.json")})
+
+
 async def api_snippets(request):
     conv_id = request.path_params["conv_id"]
     return ok(B.list_snippets(conv_id))
@@ -453,6 +502,8 @@ def create_app() -> Starlette:
         Route("/api/conversations/{conv_id}", api_conv_get, methods=["GET"]),
         Route("/api/conversations/{conv_id}", api_conv_update, methods=["PATCH", "PUT"]),
         Route("/api/conversations/{conv_id}", api_conv_delete, methods=["DELETE"]),
+        Route("/api/conversations/{conv_id}/archive", api_conv_archive,
+              methods=["POST", "DELETE"]),
         Route("/api/conversations/{conv_id}/folders", api_conv_folders, methods=["PUT"]),
         Route("/api/conversations/{conv_id}/folders/{folder_id}", api_conv_link,
               methods=["POST", "DELETE"]),
@@ -480,6 +531,10 @@ def create_app() -> Starlette:
         Route("/api/ask", api_snippet_ask_global, methods=["POST"]),
         Route("/api/conversations/{conv_id}/snippets", api_snippets, methods=["GET"]),
         Route("/api/snippets/{snippet_id}", api_snippet_delete, methods=["DELETE"]),
+        Route("/api/favorites/draw", api_favorites_share_draw,
+              methods=["GET", "POST"]),
+        Route("/api/favorites/draw.json", api_favorites_share_draw_file,
+              methods=["GET"]),
         Route("/api/boards", api_boards, methods=["GET", "POST"]),
         Route("/api/boards/{board_id}", api_board_get, methods=["GET"]),
         Route("/api/boards/{board_id}", api_board_update, methods=["PATCH", "DELETE"]),
@@ -490,4 +545,116 @@ def create_app() -> Starlette:
         Route("/api/board-edges/{edge_id}", api_board_edge, methods=["PATCH", "DELETE"]),
         Mount("/static", StaticFiles(directory=ROOT / "static"), name="static"),
     ]
-    return Starlette(routes=routes)
+    return Starlette(routes=routes, middleware=[
+        Middleware(FavoriteShareCors),
+        Middleware(NoStaleCache),
+    ])
+
+
+class FavoriteShareCors:
+    """只给「分享收藏给 draw」这几个接口开 CORS。
+
+    为什么不全局 `allow_origins=['*']`：
+      /api/settings 一类接口能读写 API Key，一旦全局放开，
+      用户随便访问的恶意网页都能 fetch 走 Key。
+    这里用白名单路径，只开放只读的收藏导出接口，
+    即使被任意源拉取，泄露的也只是用户自己勾选收藏的内容。
+
+    默认只信任本机来源（draw 跑在 127.0.0.1:8090），
+    可用环境变量 CHATTOOL_CORS_ORIGINS 以逗号分隔额外放行。
+    """
+
+    # 需要跨源读取的路径前缀（均为只读导出）
+    PATHS = ("/api/favorites/draw",)
+
+    def __init__(self, app):
+        import os
+        self.app = app
+        self.extra = [o.strip() for o in
+                      os.environ.get("CHATTOOL_CORS_ORIGINS", "").split(",") if o.strip()]
+
+    def _allow_origin(self, origin: str) -> str | None:
+        if not origin:
+            return None
+        if origin in self.extra:
+            return origin
+        # 本机任意端口都算可信（draw 换端口也不用改代码）
+        if origin in ("http://127.0.0.1", "http://localhost") or \
+           origin.startswith("http://127.0.0.1:") or \
+           origin.startswith("http://localhost:") or \
+           origin.startswith("http://[::1]"):
+            return origin
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        path = scope.get("path", "")
+        if not any(path.startswith(p) for p in self.PATHS):
+            return await self.app(scope, receive, send)
+
+        # 预检：直接回 204
+        if scope.get("method") == "OPTIONS":
+            headers = decode_headers(scope)
+            origin = self._allow_origin(headers.get("origin", ""))
+            out = [(b"content-length", b"0")]
+            if origin:
+                out += [
+                    (b"access-control-allow-origin", origin.encode()),
+                    (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
+                    (b"access-control-allow-headers", b"content-type"),
+                    (b"access-control-max-age", b"600"),
+                    (b"vary", b"origin"),
+                ]
+            await send({"type": "http.response.start", "status": 204,
+                        "headers": out})
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        origin = self._allow_origin(decode_headers(scope).get("origin", ""))
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start" and origin:
+                headers = MutableHeaders(scope=message)
+                headers["access-control-allow-origin"] = origin
+                headers["vary"] = "origin"
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+def decode_headers(scope) -> dict:
+    return {k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope.get("headers", [])}
+
+
+class NoStaleCache:
+    """让 HTML 与静态资源总是先协商再使用，避免新旧版本混用。
+
+    真实事故：StaticFiles 默认不发 Cache-Control，浏览器会按启发式
+    规则长时间缓存 app.js。于是出现「新 index.html + 旧 app.js」的
+    混用，新元素取不到 → 绑定中断 → 按钮全部失灵。
+
+    no-cache 不是不缓存，而是每次都带 ETag 回来验证（没变就 304），
+    既保证拿到新版，又不浪费流量。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        # 只处理页面与静态资源，API 不动
+        if not (path.startswith("/static/") or path == "/"):
+            return await self.app(scope, receive, send)
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["cache-control"] = "no-cache"
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)

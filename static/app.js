@@ -4,6 +4,8 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const state = {
   convs: [],
+  archived: [],           // 归档会话（左侧「归档」页）
+  archivedLoaded: false,  // 归档列表是否加载过（避免标签数字乱跳）
   folders: [],
   activeConv: null,      // 当前会话详情（含 messages）
   scopeFolder: null,     // 当前筛选的文件夹
@@ -51,6 +53,24 @@ function toast(msg, ms = 1800) {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+/* 安全绑定：元素不存在时只跳过，绝不让整个 bind() 中断。
+ *
+ * 血的教训：bind() 里原本全是 `$("#id").onclick = ...` 硬赋值。
+ * 只要 HTML 少一个元素（典型场景：浏览器缓存了旧版 index.html，
+ * 而 app.js 已是新版），就会抛 TypeError 把 bind() 打断在中间，
+ * 后面所有事件——删除、归档、发送、切换会话——全部失效，
+ * 表现就是「按钮点了没反应」。元素缺失应该只是少一个功能，
+ * 不该让整个应用报废。 */
+function on(sel, ev, fn, opts) {
+  const el = typeof sel === "string" ? $(sel) : sel;
+  if (!el) {
+    console.warn(`[ChatTool] 绑定跳过：找不到 ${sel}（页面可能已更新，请强制刷新）`);
+    return false;
+  }
+  el.addEventListener(ev, fn, opts);
+  return true;
+}
+
 const fmtTime = (iso) => {
   if (!iso) return "";
   const d = new Date(iso);
@@ -69,28 +89,178 @@ async function loadConvs() {
   if (state.search) params.set("q", state.search);
   state.convs = await api(`/api/conversations?${params}`);
   renderConvs();
+  updateArchiveTab();
   $("#conv-scope").textContent = state.scopeFolder
     ? (state.folders.find((f) => f.id === state.scopeFolder)?.name || "文件夹")
     : state.search ? `搜索：${state.search}` : "全部会话";
   $("#btn-clear-scope").hidden = !state.scopeFolder && !state.search;
 }
 
-function renderConvs() {
-  const box = $("#conv-list");
-  if (!state.convs.length) {
-    box.innerHTML = `<p class="hint">还没有会话。点右上角「＋ 新会话」开始。</p>`;
-    return;
-  }
-  box.innerHTML = state.convs.map((c) => `
-    <div class="conv-item ${state.activeConv?.id === c.id ? "active" : ""}" data-id="${c.id}">
-      <div class="t">${esc(c.title)}</div>
+/* 会话条目：右侧 ⋯（手机上常显、桌面 hover 出现），也支持长按 / 右键 */
+function convItemHTML(c, { archived = false } = {}) {
+  const folders = (c.folders || []).map((f) =>
+    `<span class="chip"><i class="dot" style="background:${f.color}"></i>${esc(f.name)}</span>`).join("");
+  return `
+    <div class="conv-item ${state.activeConv?.id === c.id ? "active" : ""} ${archived ? "is-archived" : ""}"
+         data-id="${c.id}">
+      <div class="conv-row">
+        <div class="t">${esc(c.title)}</div>
+        <button class="conv-more-btn" data-act="menu" data-id="${c.id}"
+                title="重命名 / 归档 / 删除" aria-label="会话操作">⋯</button>
+      </div>
       <div class="p">${esc(c.preview || "（暂无消息）")}</div>
       <div class="meta">
         <span>${fmtTime(c.updated_at)}</span>
         <span>${c.message_count} 条</span>
-        ${(c.folders || []).map((f) => `<span class="chip"><i class="dot" style="background:${f.color}"></i>${esc(f.name)}</span>`).join("")}
+        ${folders}
       </div>
-    </div>`).join("");
+    </div>`;
+}
+
+function renderConvs() {
+  const box = $("#conv-list");
+  if (!box) return;
+  if (!state.convs.length) {
+    box.innerHTML = `<p class="hint">还没有会话。点右上角「＋ 新会话」开始。</p>`;
+    return;
+  }
+  box.innerHTML = state.convs.map((c) => convItemHTML(c)).join("");
+}
+
+/* ---------------------------------------------------------------- 已归档 */
+async function loadArchived() {
+  state.archived = await api("/api/conversations?archived=1");
+  state.archivedLoaded = true;
+  renderArchived();
+  updateArchiveTab();
+}
+
+function renderArchived() {
+  const box = $("#archive-list");
+  if (!box) return;
+  const list = state.archived || [];
+  const emptyBtn = $("#btn-empty-archive");
+  if (emptyBtn) emptyBtn.hidden = !list.length;
+  if (!list.length) {
+    box.innerHTML = `<p class="hint">没有归档的会话。在会话上长按/右键，或点 ⋯ →「归档」。</p>`;
+    return;
+  }
+  box.innerHTML = list.map((c) => convItemHTML(c, { archived: true })).join("");
+}
+
+/** 归档标签上显示数量 */
+function updateArchiveTab() {
+  const tab = $('.tab[data-view="archive"]');
+  if (!tab || !state.archivedLoaded) return;
+  const n = (state.archived || []).length;
+  tab.textContent = n ? `归档 ${n}` : "归档";
+}
+
+/** 启动时拉一次归档数量，让标签一进来就带数字 */
+async function primeArchiveCount() {
+  try {
+    state.archived = await api("/api/conversations?archived=1");
+    state.archivedLoaded = true;
+    updateArchiveTab();
+  } catch { /* 离线/出错不影响主界面 */ }
+}
+
+/** 会话操作菜单：列表里的条目、顶栏的 ⋯ 共用 */
+function showConvMenu(convId, anchor) {
+  const inArchive = (state.archived || []).some((c) => c.id === convId);
+  const conv = state.convs.find((c) => c.id === convId)
+    || (state.archived || []).find((c) => c.id === convId)
+    || (state.activeConv?.id === convId ? state.activeConv : null);
+  if (!conv) return;
+  const archived = inArchive || !!conv.archived;
+
+  // 菜单挂到 body：手机上 .sidebar 带 transform + overflow:hidden，
+  // fixed 定位会相对侧栏并被裁掉，菜单等于看不见。
+  const menu = $("#conv-more-menu");
+  if (!menu) return;
+  if (menu.parentElement !== document.body) document.body.appendChild(menu);
+
+  menu.innerHTML = `
+    <button data-act="open">打开</button>
+    <button data-act="rename">重命名</button>
+    <button data-act="folders">归类到文件夹…</button>
+    <hr>
+    <button data-act="archive">${archived ? "↩ 恢复（取消归档）" : "归档"}</button>
+    <button data-act="delete" class="is-danger">删除…</button>`;
+
+  // 贴到触发元素旁，并夹在视口内
+  const rect = (anchor || $("#btn-conv-more"))?.getBoundingClientRect()
+    || { bottom: 60, left: 12 };
+  const menuW = 200, menuH = 240;
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.minWidth = `${menuW}px`;
+  menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - menuH - 8))}px`;
+  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menuW - 8))}px`;
+
+  menu.onclick = async (e) => {
+    const b = e.target.closest("button[data-act]");
+    if (!b) return;
+    closeConvMenu();
+    const act = b.dataset.act;
+    if (act === "open") return openConv(conv.id);
+    if (act === "rename") return renameConv(conv.id, conv.title);
+    if (act === "folders") { await openConv(conv.id); return openFolderPicker(); }
+    if (act === "archive") return archived ? unarchiveConv(conv.id) : archiveConvById(conv.id);
+    if (act === "delete") return deleteConvById(conv.id, conv.title);
+  };
+  menu.classList.add("open");
+  const topBtn = $("#btn-conv-more");
+  if (topBtn) topBtn.setAttribute("aria-expanded", "true");
+}
+
+function closeConvMenu() {
+  $("#conv-more-menu")?.classList.remove("open");
+  const btn = $("#btn-conv-more");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+async function renameConv(convId, current) {
+  const title = prompt("会话名称", current || "未命名会话");
+  if (title === null) return;
+  const name = title.trim() || "未命名会话";
+  await api(`/api/conversations/${convId}`, { method: "PATCH", body: { title: name } });
+  if (state.activeConv?.id === convId) {
+    state.activeConv.title = name;
+    const t = $("#conv-title");
+    if (t) t.textContent = name;
+  }
+  await loadConvs();
+  if (state.archivedLoaded) await loadArchived();
+  toast("已重命名");
+}
+
+async function archiveConvById(convId) {
+  await api(`/api/conversations/${convId}/archive`, { method: "POST" });
+  const wasActive = state.activeConv?.id === convId;
+  if (wasActive) state.activeConv = null;
+  await loadConvs();
+  await loadArchived();
+  toast("已归档，可在左侧「归档」恢复");
+  if (wasActive) await ensureConversation();
+}
+
+async function unarchiveConv(convId) {
+  await api(`/api/conversations/${convId}/archive`, { method: "DELETE" });
+  await loadArchived();
+  await loadConvs();
+  toast("已恢复");
+}
+
+async function deleteConvById(convId, title) {
+  if (!confirm(`彻底删除「${title || "该会话"}」及其所有消息？不可恢复。`)) return;
+  await api(`/api/conversations/${convId}`, { method: "DELETE" });
+  const wasActive = state.activeConv?.id === convId;
+  if (wasActive) state.activeConv = null;
+  await loadConvs();
+  if (state.archivedLoaded) await loadArchived();
+  toast("已删除");
+  if (wasActive) await ensureConversation();
 }
 
 /* ---------------------------------------------------------------- 侧栏：文件夹 */
@@ -643,20 +813,12 @@ async function saveTitle() {
 }
 
 async function archiveConv() {
-  await api(`/api/conversations/${state.activeConv.id}`, { method: "PATCH", body: { archived: 1 } });
-  toast("已归档");
-  state.activeConv = null;
-  await loadConvs();
-  await ensureConversation();
+  return state.activeConv ? archiveConvById(state.activeConv.id) : undefined;
 }
 
 async function deleteConv() {
-  if (!confirm("彻底删除该会话及其所有消息？")) return;
-  await api(`/api/conversations/${state.activeConv.id}`, { method: "DELETE" });
-  state.activeConv = null;
-  toast("已删除");
-  await loadConvs();
-  await ensureConversation();
+  return state.activeConv
+    ? deleteConvById(state.activeConv.id, state.activeConv.title) : undefined;
 }
 
 /** 打开应用时进入一个「可立即输入」的界面。
@@ -796,6 +958,42 @@ async function loadFavorites() {
     setTimeout(() => $(`.msg[data-id="${el.dataset.msg}"]`)
       ?.scrollIntoView({ behavior: "smooth", block: "center" }), 120);
   };
+}
+
+/* 分享收藏到 draw（上层绘图软件）：导出兼容 draw 的画布 JSON */
+async function shareFavoritesToDraw() {
+  const res = await api("/api/favorites/draw");
+  const data = res;
+  const count = (data.nodes || []).length;
+  const name = `chattool-favorites-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.json`;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+
+  // 优先：浏览器支持目录写入时，尽量落到 draw 目录（用户选一次即可）
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: name,
+        types: [{ description: "draw 画布", accept: { "application/json": [".json"] } }],
+      });
+      const w = await handle.createWritable();
+      await w.write(blob);
+      await w.close();
+      toast(`已导出 ${count} 张卡片，到 draw 里点「⬆ 导入」选择该文件`);
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;  // 用户取消
+      console.warn("保存面板不可用，改用下载", e);
+    }
+  }
+
+  // 退路：普通下载
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`已导出 ${count} 张卡片，在 draw 里点「⬆ 导入」`);
 }
 
 /* ---------------------------------------------------------------- 视图切换 */
@@ -945,171 +1143,268 @@ async function testKey() {
 
 /* ---------------------------------------------------------------- 事件绑定 */
 function bind() {
-  MD.bindCopy(document.body);
-  $("#btn-menu").onclick = () => $("#sidebar").classList.toggle("open");
-  $("#btn-new").onclick = newConversation;
-  $("#btn-new-folder").onclick = newFolder;
-  $("#btn-clear-scope").onclick = () => {
-    state.scopeFolder = null;
-    state.search = "";
-    $("#global-search").value = "";
-    loadConvs();
-    loadFolders();
+  // 逐个绑定，每个都容错：任何一个元素缺失都不影响其余功能
+  const guard = (label, fn) => {
+    try { fn(); } catch (e) {
+      console.error(`[ChatTool] 绑定「${label}」失败`, e);
+      fatal(`绑定 ${label}`, e);
+    }
   };
-  $$(".tab").forEach((t) => (t.onclick = () => switchView(t.dataset.view)));
 
-  let searchTimer;
-  $("#global-search").oninput = (e) => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => {
-      state.search = e.target.value.trim();
+  guard("Markdown 复制按钮", () => MD.bindCopy(document.body));
+  guard("白天黑夜", () => Theme.bind());
+
+  /* ---- 顶栏 ---- */
+  guard("顶栏", () => {
+    on("#btn-menu", "click", () => $("#sidebar").classList.toggle("open"));
+    on("#btn-new", "click", newConversation);
+    on("#btn-archive", "click", archiveConv);
+    on("#btn-del-conv", "click", deleteConv);
+    on("#btn-settings", "click", openSettings);
+    on("#btn-share", "click", () => { $("#share-out").innerHTML = ""; $("#modal-share").hidden = false; });
+    on("#btn-do-share", "click", doShare);
+    on("#btn-import", "click", () => ($("#modal-import").hidden = false));
+    on("#btn-do-import", "click", doImport);
+    on("#btn-snippets", "click", () => AskPanel.openHistory());
+    // 顶栏 ⋯：作用于当前会话
+    on("#btn-conv-more", "click", (e) => {
+      e.stopPropagation();
+      if (!state.activeConv) return;
+      if ($("#conv-more-menu")?.classList.contains("open")) return closeConvMenu();
+      showConvMenu(state.activeConv.id, $("#btn-conv-more"));
+    });
+  });
+
+  /* ---- 侧栏 ---- */
+  guard("侧栏", () => {
+    on("#btn-new-folder", "click", newFolder);
+    on("#btn-fav-draw", "click", () => shareFavoritesToDraw().catch((e) => toast(e.message)));
+    on("#btn-clear-scope", "click", () => {
+      state.scopeFolder = null;
+      state.search = "";
+      const s = $("#global-search");
+      if (s) s.value = "";
       loadConvs();
-    }, 250);
-  };
-  $("#global-search").onkeydown = (e) => { if (e.key === "Escape") e.target.value = ""; };
+      loadFolders();
+    });
+    $$(".tab").forEach((t) => (t.onclick = () => switchView(t.dataset.view)));
+  });
 
-  $("#conv-list").onclick = (e) => {
-    const item = e.target.closest(".conv-item");
-    if (item) openConv(item.dataset.id);
-  };
+  /* ---- 搜索 ---- */
+  guard("搜索", () => {
+    let searchTimer;
+    on("#global-search", "input", (e) => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        state.search = e.target.value.trim();
+        loadConvs();
+      }, 250);
+    });
+    on("#global-search", "keydown", (e) => { if (e.key === "Escape") e.target.value = ""; });
+  });
 
-  $("#messages").onclick = async (e) => {
-    const btn = e.target.closest("[data-act]");
-    if (!btn) return;
-    const id = btn.dataset.id;
-    const act = btn.dataset.act;
-    if (act === "fav") return toggleFav(id);
-    if (act === "edit") { state.editingMsgId = id; renderMessages(); $(`#edit-${id}`)?.focus(); }
-    if (act === "cancel-edit") { state.editingMsgId = null; renderMessages(); }
-    if (act === "save-edit") return saveBranchEdit(id);
-    if (act === "tag") return addTag(id);
-    if (act === "branch") return showBranches(id);
-    if (act === "ask") {
-      // 没选中文本时，用整条消息作为引文
-      const msg = state.activeConv.messages.find((x) => x.id === id);
-      if (!msg) return;
-      document.querySelector(`#ask-bubble`)?.setAttribute("hidden", "");
-      const bubble = document.querySelector("#ask-bubble");
-      if (bubble) bubble.dataset.msgId = id;
-      AskPanel.openWith((msg.content || "").slice(0, 4000));
-      return;
-    }
-    if (act === "board") {
-      await Board.addMessage(id, state.activeConv.id);
-      return;
-    }
-    if (act === "regen") {
-      await generateReply({ fromId: id });
-      return;
-    }
-    if (act === "del") return deleteMsg(id);
-  };
+  /* ---- 会话列表 / 归档列表：点击、长按、右键 ---- */
+  guard("会话列表", () => {
+    const bindConvList = (box, { openOnClick }) => {
+      if (!box) return;
+      box.onclick = (e) => {
+        const btn = e.target.closest?.("[data-act='menu']");
+        const item = e.target.closest?.(".conv-item");
+        if (!item) return;
+        if (btn) return showConvMenu(item.dataset.id, btn);
+        if (openOnClick) openConv(item.dataset.id);
+      };
+      box.oncontextmenu = (e) => {
+        const item = e.target.closest(".conv-item");
+        if (!item) return;
+        e.preventDefault();
+        showConvMenu(item.dataset.id, item);
+      };
+      // 手机长按 500ms
+      let timer = null, moved = false;
+      box.addEventListener("pointerdown", (e) => {
+        const item = e.target.closest(".conv-item");
+        if (!item) return;
+        moved = false;
+        timer = setTimeout(() => {
+          if (!moved) {
+            showConvMenu(item.dataset.id, item);
+            if (navigator.vibrate) navigator.vibrate(12);
+          }
+        }, 500);
+      });
+      const cancel = () => { clearTimeout(timer); timer = null; };
+      ["pointerup", "pointercancel", "pointerleave"].forEach((ev) => box.addEventListener(ev, cancel));
+      box.addEventListener("pointermove", () => { moved = true; cancel(); });
+      box.addEventListener("scroll", cancel, true);
+    };
+    bindConvList($("#conv-list"), { openOnClick: true });
+    bindConvList($("#archive-list"), { openOnClick: true });
 
-  $("#conv-title").onblur = () => { if (state.activeConv) saveTitle(); };
-  $("#conv-title").onkeydown = (e) => {
-    if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
-  };
-  $("#btn-archive").onclick = archiveConv;
-  $("#btn-del-conv").onclick = deleteConv;
+    on("#btn-empty-archive", "click", async () => {
+      const n = (state.archived || []).length;
+      if (!n) return;
+      if (!confirm(`彻底删除这 ${n} 个已归档会话及其全部消息？不可恢复。`)) return;
+      for (const c of [...state.archived]) {
+        await api(`/api/conversations/${c.id}`, { method: "DELETE" });
+      }
+      await loadArchived();
+      toast("已清空归档");
+    });
+  });
 
-  $("#btn-export").onclick = (e) => {
-    e.stopPropagation();
-    $("#export-menu").classList.toggle("open");
-  };
-  $("#export-menu").onclick = (e) => {
-    const b = e.target.closest("button[data-fmt]");
-    if (!b) return;
-    download(b.dataset.fmt, b.dataset.branch === "1");
-    $("#export-menu").classList.remove("open");
-  };
-  document.addEventListener("click", () => $("#export-menu")?.classList.remove("open"));
+  /* ---- 会话标题 ---- */
+  guard("会话标题", () => {
+    on("#conv-title", "blur", () => { if (state.activeConv) saveTitle(); });
+    on("#conv-title", "keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+    });
+  });
 
-  $("#btn-share").onclick = () => {
-    $("#share-out").innerHTML = "";
-    $("#modal-share").hidden = false;
-  };
-  $("#btn-do-share").onclick = doShare;
+  /* ---- 导出菜单 ---- */
+  guard("导出菜单", () => {
+    on("#btn-export", "click", (e) => {
+      e.stopPropagation();
+      $("#export-menu").classList.toggle("open");
+    });
+    on("#export-menu", "click", (e) => {
+      const b = e.target.closest("button[data-fmt]");
+      if (!b) return;
+      download(b.dataset.fmt, b.dataset.branch === "1");
+      $("#export-menu").classList.remove("open");
+    });
+  });
 
-  $("#btn-import").onclick = () => ($("#modal-import").hidden = false);
-  $("#btn-do-import").onclick = doImport;
-  $("#btn-settings").onclick = openSettings;
+  /* ---- 消息列表 ---- */
+  guard("消息列表", () => {
+    on("#messages", "click", async (e) => {
+      const btn = e.target.closest("[data-act]");
+      if (!btn) return;
+      const id = btn.dataset.id;
+      const act = btn.dataset.act;
+      if (act === "fav") return toggleFav(id);
+      if (act === "edit") { state.editingMsgId = id; renderMessages(); $(`#edit-${id}`)?.focus(); }
+      if (act === "cancel-edit") { state.editingMsgId = null; renderMessages(); }
+      if (act === "save-edit") return saveBranchEdit(id);
+      if (act === "tag") return addTag(id);
+      if (act === "branch") return showBranches(id);
+      if (act === "ask") {
+        const msg = state.activeConv.messages.find((x) => x.id === id);
+        if (!msg) return;
+        document.querySelector("#ask-bubble")?.setAttribute("hidden", "");
+        const bubble = document.querySelector("#ask-bubble");
+        if (bubble) bubble.dataset.msgId = id;
+        AskPanel.openWith((msg.content || "").slice(0, 4000));
+        return;
+      }
+      if (act === "board") {
+        await Board.addMessage(id, state.activeConv.id);
+        return;
+      }
+      if (act === "regen") { await generateReply({ fromId: id }); return; }
+      if (act === "del") return deleteMsg(id);
+    });
+  });
 
   /* ---- 右侧历史栏 ---- */
-  const threadbar = $("#threadbar");
-  const toggleThread = (force) => {
-    const isCollapsed = threadbar.classList.contains("collapsed");
-    const willOpen = force !== undefined ? force : isCollapsed;
-    threadbar.classList.toggle("collapsed", !willOpen);
-    const btn = $("#btn-thread");
-    if (btn) btn.classList.toggle("on", willOpen);
-    $("#btn-thread-toggle").textContent = willOpen ? "⟩" : "⟨";
-  };
-  // 手机上默认收起，桌面默认展开
-  toggleThread(window.innerWidth > 760);
-  $("#btn-thread").onclick = () => toggleThread();
-  $("#btn-thread-toggle").onclick = () => toggleThread();
-  // 滚动联动高亮（节流）
-  let scrollTick = false;
-  $("#main").addEventListener("scroll", () => {
-    if (scrollTick) return;
-    scrollTick = true;
-    requestAnimationFrame(() => {
-      scrollTick = false;
-      ThreadView.setActiveFromScroll();
-    });
-  }, { passive: true });
+  guard("历史栏", () => {
+    const threadbar = $("#threadbar");
+    if (!threadbar) return;
+    const toggleThread = (force) => {
+      const isCollapsed = threadbar.classList.contains("collapsed");
+      const willOpen = force !== undefined ? force : isCollapsed;
+      threadbar.classList.toggle("collapsed", !willOpen);
+      const btn = $("#btn-thread");
+      if (btn) btn.classList.toggle("on", willOpen);
+      const t = $("#btn-thread-toggle");
+      if (t) t.textContent = willOpen ? "⟩" : "⟨";
+    };
+    toggleThread(window.innerWidth > 760);
+    on("#btn-thread", "click", () => toggleThread());
+    on("#btn-thread-toggle", "click", () => toggleThread());
+    let scrollTick = false;
+    on("#main", "scroll", () => {
+      if (scrollTick) return;
+      scrollTick = true;
+      requestAnimationFrame(() => {
+        scrollTick = false;
+        ThreadView.setActiveFromScroll();
+      });
+    }, { passive: true });
+  });
 
   /* ---- 悬浮提问 ---- */
-  AskPanel.bindSelection();
-  $("#btn-snippets").onclick = () => AskPanel.openHistory();
+  guard("悬浮提问", () => AskPanel.bindSelection());
 
   /* ---- 画板 ---- */
-  Board.bind();
-  // 预加载画板列表，以便消息底部按钮直接使用
-  Board.loadBoards().catch(() => {});
+  guard("画板", () => {
+    Board.bind();
+    Board.loadBoards().catch(() => {});
+  });
 
-  $$("[data-close]").forEach((b) => (b.onclick = () => (b.closest(".modal").hidden = true)));
-  $$(".modal").forEach((m) => (m.onclick = (e) => { if (e.target === m) m.hidden = true; }));
+  /* ---- 弹窗通用关闭 ---- */
+  guard("弹窗", () => {
+    $$("[data-close]").forEach((b) => (b.onclick = () => (b.closest(".modal").hidden = true)));
+    $$(".modal").forEach((m) => (m.onclick = (e) => { if (e.target === m) m.hidden = true; }));
+  });
 
-  const input = $("#composer-input");
-  input.oninput = () => {
-    input.style.height = "auto";
-    input.style.height = Math.min(input.scrollHeight, 200) + "px";
-  };
-  input.onkeydown = (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); sendMessage("ai"); }
-  };
-  $("#btn-send").onclick = () => sendMessage("ai");
-  $("#btn-send-only").onclick = () => sendMessage("save");
-  $("#btn-stop").onclick = stopStreaming;
+  /* ---- 输入区：发送 / 仅存 / 停止 ---- */
+  guard("输入区", () => {
+    on("#composer-input", "input", (e) => {
+      const input = e.target;
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 200) + "px";
+    });
+    on("#composer-input", "keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); sendMessage("ai"); }
+    });
+    on("#btn-send", "click", () => sendMessage("ai"));
+    on("#btn-send-only", "click", () => sendMessage("save"));
+    on("#btn-stop", "click", stopStreaming);
+  });
 
-  $("#composer-provider").onchange = (e) => {
-    composerState.provider = e.target.value;
-    syncModelFromProvider(null);
-    savePrefs();
-    renderComposerSelects();
-    const p = currentProvider();
-    if (p && !p.configured) toast("该服务商未配置 Key，请点右上角 ⚙", 2600);
-  };
-  $("#composer-model").onchange = (e) => {
-    composerState.model = e.target.value;
-    savePrefs();
-    renderComposerSelects();
-  };
-  $("#composer-effort").onchange = (e) => {
-    composerState.effort = e.target.value;
-    savePrefs();
-    renderComposerSelects();
-  };
+  /* ---- 服务商 / 模型 / 思考强度 ---- */
+  guard("模型选择", () => {
+    on("#composer-provider", "change", (e) => {
+      composerState.provider = e.target.value;
+      syncModelFromProvider(null);
+      savePrefs();
+      renderComposerSelects();
+      const p = currentProvider();
+      if (p && !p.configured) toast("该服务商未配置 Key，请点右上角 ⚙", 2600);
+    });
+    on("#composer-model", "change", (e) => {
+      composerState.model = e.target.value;
+      savePrefs();
+      renderComposerSelects();
+    });
+    on("#composer-effort", "change", (e) => {
+      composerState.effort = e.target.value;
+      savePrefs();
+      renderComposerSelects();
+    });
+  });
 
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      $$(".modal").forEach((m) => (m.hidden = true));
+  /* ---- 全局键盘 ---- */
+  guard("全局快捷键", () => {
+    document.addEventListener("click", (e) => {
       $("#export-menu")?.classList.remove("open");
-    }
+      // 菜单内部的点击不要关（交给菜单自己的 handler 处理）；
+      // 触发按钮（顶栏 ⋯ 与列表里的 ⋯）也不要关，否则“开了又被关”。
+      if (e.target.closest?.("#conv-more-menu")) return;
+      if (e.target.closest?.("[data-act='menu']")) return;
+      if (e.target.closest?.("#btn-conv-more")) return;
+      closeConvMenu();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        $$(".modal").forEach((m) => (m.hidden = true));
+        $("#export-menu")?.classList.remove("open");
+        closeConvMenu();
+      }
+    });
   });
 }
-
 /* ---------------------------------------------------------------- 启动 */
 (async function init() {
   try {

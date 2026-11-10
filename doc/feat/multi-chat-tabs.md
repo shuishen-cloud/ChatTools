@@ -107,3 +107,26 @@ restoreScroll(convId) // 有锚点消息就 scrollIntoView(block:"start")，否�
 5. 滚动位置记忆存在（`chattool.scroll.<id>` 或内存 Map + 锚点消息）
 6. 打开会话后必须调 `renderTabs`（标题同步）
 7. 画板 tab 与对话 tab 共用同一套渲染函数（不得保留两套）
+
+## 9. 实现与校验结果
+
+**已落地**：
+
+- 删除静态 `data-viewtab="chat"` 按钮，`renderTabs()` 动态渲染对话与画板；
+- 存储统一为 `chattool.tabs: [{kind,id}]` + `chattool.tab.active`；
+- `saveScroll` / `restoreScroll` 用**锚点消息 id**（内存 `Map`，不落库）；
+- 关闭最后一个对话 tab 自动开新会话，保证「永远能说话」；
+- `openConv` 末尾调 `renderTabs`，标题改动即时同步。
+
+**校验**：
+
+```bash
+.venv/bin/python -m tests.test_chat_tabs   # 11 tests OK
+node tests/tab_state.test.js               # 状态机行为全部正确
+```
+
+`tab_state.test.js` 用最小 DOM 桩跑**真实** `panels.js` 的状态机，
+验证去重 / 回落 / 混排 / 滚动记忆的行为，而不是 grep 字符串。
+
+**坑（已记笔记）**：同一会话开两个 tab 会引入「两视图共享一份数据」的同步问题，
+而 `state.activeConv` 是单例。用锚点式滚动记忆解决真实痛点，零同步风险。

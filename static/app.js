@@ -1,4 +1,26 @@
 /* ChatTool 前端逻辑（无构建步骤，原生 DOM） */
+
+/* 部署子路径前缀（如 "/8000"，根路径部署时为空串）。
+ *
+ * 为什么不能在 JS 里从 location.pathname 推断：
+ *   - 多级子路径（/tools/chattool）取第一段就错；
+ *   - 分享页 /8000/s/<token> 与首页 /8000/ 深度不同，猜法不统一。
+ * 所以由服务端在 index.html 里注入 window.__CT_PREFIX（读 CHATTOOL_PREFIX）。
+ *
+ * 不拼前缀的后果：/8000/ 下 fetch("/api/x") 会打到根路径 /api/x → 404，
+ * 表现为页面能开、但所有数据加载、发消息、导出全部失败。 */
+const PREFIX = window.__CT_PREFIX || "";
+
+/** 给绝对路径加上部署前缀；非 "/" 开头（已是完整 URL）原样返回。 */
+function withPrefix(path) {
+  if (typeof path !== "string" || !path.startsWith("/")) return path;
+  return PREFIX + path;
+}
+
+// panels.js 在 app.js 之前加载，拿不到上面的局部符号，经 window 共享。
+// 它内部的 fetch 都在事件回调里跑，此时本文件已执行完毕，可安全取用。
+window.__ctWithPrefix = withPrefix;
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
@@ -37,7 +59,7 @@ window.__chattoolAppState = state;
 
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(withPrefix(path), {
     headers: { "Content-Type": "application/json" },
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -686,7 +708,7 @@ async function generateReply({ fromId = null } = {}) {
   let errMsg = "";
 
   try {
-    const res = await fetch(`/api/conversations/${conv.id}/generate`, {
+    const res = await fetch(withPrefix(`/api/conversations/${conv.id}/generate`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
@@ -907,7 +929,7 @@ async function doShare() {
   const branchOnly = $("#share-branch").checked;
   const info = await api(`/api/conversations/${state.activeConv.id}/share`,
     { method: "POST", body: { branch_only: branchOnly } });
-  const full = location.origin + info.url;
+  const full = location.origin + withPrefix(info.url);
   $("#share-out").innerHTML = `只读分享链接：<br><a href="${full}" target="_blank">${full}</a>`;
   try {
     await navigator.clipboard.writeText(full);
@@ -916,8 +938,8 @@ async function doShare() {
 }
 
 function download(fmt, branchOnly) {
-  const url = `/api/conversations/${state.activeConv.id}/export?format=${fmt}`
-    + (branchOnly ? "&branch_only=1" : "");
+  const url = withPrefix(`/api/conversations/${state.activeConv.id}/export?format=${fmt}`
+    + (branchOnly ? "&branch_only=1" : ""));
   const a = document.createElement("a");
   a.href = url;
   a.download = "";

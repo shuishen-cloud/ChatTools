@@ -450,7 +450,10 @@ const AskPanel = (() => {
     const controller = new AbortController();
     state.abort = controller;
     try {
-      const res = await fetch(endpoint, {
+      // 子路径部署时 endpoint 是 "/api/..."，必须拼上部署前缀（见 app.js 的 withPrefix）。
+      // panels.js 先于 app.js 加载，拿不到其局部函数，故经 window 共享。
+      const prefixed = (window.__ctWithPrefix || ((p) => p))(endpoint);
+      const res = await fetch(prefixed, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,

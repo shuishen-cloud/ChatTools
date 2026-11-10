@@ -29,7 +29,8 @@ check("跟随系统 prefers-color-scheme", js.includes("prefers-color-scheme: li
 console.log("\n== index.html ==");
 check("主题按钮 #btn-theme", /id="btn-theme"/.test(html));
 check("三态菜单 data-theme-mode", (html.match(/data-theme-mode=/g) || []).length === 3);
-check("加载 theme.js", /<script src="\/static\/theme\.js"><\/script>/.test(html));
+// 前缀可选：服务端会按 CHATTOOL_PREFIX 替换 %%PREFIX%%（根路径部署时为空）
+check("加载 theme.js", /<script src="(?:%%PREFIX%%)?\/static\/theme\.js"><\/script>/.test(html));
 const prescript = html.slice(0, html.indexOf("<body"));
 check("首帧前置主题脚本（防闪白）", /dataset\.theme/.test(prescript));
 check("前置脚本在样式表之后 body 之前",

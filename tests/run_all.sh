@@ -11,6 +11,9 @@ echo
 echo "===== 画板融入系统（归类/尺寸/Markdown）====="
 python3 -m tests.test_board_integration
 echo
+echo "===== 部署子路径前缀（/8000）====="
+python3 -m tests.test_deploy_prefix
+echo
 echo "===== 多对话 tab ====="
 python3 -m tests.test_chat_tabs
 echo

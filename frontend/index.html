@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>ChatTool · 对话脉络管理</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="%%PREFIX%%/static/style.css">
 <!-- 主题预置：在首帧之前定好白天/黑夜，避免闪白（脚本失败时保持默认夜间） -->
 <script>
 (function () {
@@ -284,9 +284,13 @@
 <div id="toast" class="toast" hidden></div>
 <!-- 会话操作菜单：挂在 body 上，避免被侧栏的 overflow / transform 裁掉 -->
 <div class="menu conv-menu" id="conv-more-menu" role="menu"></div>
-<script src="/static/theme.js"></script>
-<script src="/static/markdown.js"></script>
-<script src="/static/panels.js"></script>
-<script src="/static/app.js"></script>
+<!-- 部署子路径前缀：服务端按 CHATTOOL_PREFIX 替换 %%PREFIX%%（未设时为空串）。
+     前端 withPrefix() 读 window.__CT_PREFIX，panels.js 通过 window.__ctWithPrefix 共享。
+     不能在前端猜测前缀：多级路径（/tools/chattool）上猜不准。 -->
+<script>window.__CT_PREFIX = "%%PREFIX%%";</script>
+<script src="%%PREFIX%%/static/theme.js"></script>
+<script src="%%PREFIX%%/static/markdown.js"></script>
+<script src="%%PREFIX%%/static/panels.js"></script>
+<script src="%%PREFIX%%/static/app.js"></script>
 </body>
 </html>

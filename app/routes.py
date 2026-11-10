@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -23,6 +24,26 @@ from .utils import err, ok, read_json
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend"
+
+
+def deploy_prefix() -> str:
+    """部署子路径前缀，如 "/8000"；未部署到子路径时为空串。
+
+    为什么走环境变量而不是从请求路径推断：
+      1. 本机开发在根路径，与生产（/8000）必须共存且行为一致；
+      2. 多级子路径（/tools/chattool）靠"取第一段"会算错；
+      3. 分享页 /s/<token> 是独立渲染，拿不到前端上下文，只能进程内全局可见。
+
+    规范化：去尾斜杠、补齐前导斜杠。宁可错也不能拼出 "8000/static"
+    这种相对路径——那会随当前页面层级变化，深层页面直接 404。
+    """
+    raw = (os.environ.get("CHATTOOL_PREFIX") or "").strip()
+    if not raw or raw == "/":
+        return ""
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    return raw.rstrip("/")
+
 
 
 # ---------------------------------------------------------------- 会话
@@ -495,7 +516,14 @@ async def api_stats(request):
 # ---------------------------------------------------------------- 静态页
 
 async def index(request):
-    return FileResponse(FRONTEND / "index.html")
+    """首页：把模板里的 %%PREFIX%% 换成实际部署前缀。
+
+    用读文本+替换而不是让前端猜前缀，因为 <link>/<script> 的 src 必须是
+    服务端就能确定的绝对路径，否则首帧会先 404 再被 JS 纠正，白屏一闪。
+    前缀为空时替换结果与改动前逐字节一致（回归零风险）。
+    """
+    html = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("%%PREFIX%%", deploy_prefix()))
 
 
 def create_app() -> Starlette:

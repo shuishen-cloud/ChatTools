@@ -1,0 +1,20 @@
+# 构建镜像时排除的东西
+#
+# data/ 最关键：里面是用户的 chattool.db（含 LLM API Key）。
+# 一旦被 COPY 进镜像层，Key 就进了镜像历史，docker push 会把它带出去。
+
+data/
+.venv/
+venv/
+.git/
+.gitignore
+tests/
+doc/
+.pdm/
+.run/
+__pycache__/
+*.py[cod]
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/

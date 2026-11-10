@@ -112,3 +112,24 @@
   3. tab 条 `#viewtabs` 存在且含对话 tab；
   4. `chattool.board.active` 键存在（记忆上次画板）；
   5. 已打开画板 tab 去重。
+
+## 5. 实现与校验结果
+
+**已落地**：
+
+- `#boardview` 已在 `#main` 内，与 `#detail` 同级，用 `[hidden]` 互斥；
+- `.boardview` 改为 `flex: 1; min-height: 0; display: flex` 流内布局，
+  不再有 `position: fixed` / `inset: 0` / `z-index`；
+- 新增 `#viewtabs` 一级 tab 条（对话 + 多个画板 tab）；
+- `chattool.view` / `chattool.board.open` / `chattool.board.active` 持久化，
+  刷新后恢复上次视图与已打开画板；
+- 全屏保留为可选增强（`F` 键 / 顶栏按钮 → `.boardview.fullscreen`，Esc 退出）。
+
+**校验**：
+
+```bash
+.venv/bin/python -m tests.test_board_view      # 10 tests OK
+```
+
+**坑**：遮罩形态最容易被改回去——只要有人给 `.boardview` 加回
+`position: fixed; inset: 0`，`test_02` 立刻报错。这条断言是这份设计的护栏。

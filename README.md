@@ -470,7 +470,7 @@ CHATTOOL_DATA=/path/to/data python3 -m app
 | 项 | 值 |
 |---|---|
 | 入口 | `https://www.shuishen.cloud:8080/chat/`（自签名证书，首次点「继续前往」） |
-| 鉴权 | Nginx Basic Auth（`.htpasswd`）——DB 里存着用户的 LLM API Key，不能裸奔 |
+| 鉴权 | Nginx Basic Auth（`.htpasswd`）——DB 里存着用户的 LLM API Key，不能裸奔；**例外**：`/api/favorites/draw*` 对 draw 开放（见下） |
 | 容器端口 | 应用监听 **8765**（`Dockerfile` CMD 写死），compose 里 `expose: ["8765"]` |
 | 数据 | 命名卷 `chat_data` 挂到 `/app/data`，重建容器不丢会话与 Key |
 
@@ -497,6 +497,30 @@ location ^~ /chat/ {
 `ssl_preread` 只转发 TCP，nginx 拿不到真实公网端口，会把跳转拼成
 `https://域名:8443/chat/`（8443 未映射，点了打不开）。本项目改为 `/chat` 与
 `/chat/` 两个 location 都直接代理。
+
+### 收藏导出接口对 draw 开放
+
+draw（`https://…/draw/`）可以把本项目的收藏导入画布。它在服务器上按
+`location.origin + '/chat/api/favorites/draw'` 推导地址，**同源、无 CORS**。
+
+但 draw 是公开页面，用户打开它时没登录过 `/chat`，浏览器没有 Basic Auth 凭据缓存，
+所以这两条只读导出接口在 Nginx 上单独免认证（`=` 精确匹配，优先级高于 `^~ /chat/`）：
+
+```nginx
+location = /chat/api/favorites/draw {
+    auth_basic off;
+    proxy_pass http://chattool:8765/api/favorites/draw;
+    include /etc/nginx/conf.d/proxy_params;
+}
+location = /chat/api/favorites/draw.json {
+    auth_basic off;
+    proxy_pass http://chattool:8765/api/favorites/draw.json;
+    include /etc/nginx/conf.d/proxy_params;
+}
+```
+
+**不要扩大到其他路径**：`/api/settings` 可读写 LLM API Key，必须留在认证之后。
+放开的只是用户勾选收藏的卡片文本，不含任何凭据。
 
 更新流程：本地 commit → push → 服务器 `git pull` → `docker compose up -d --build chattool`。
 

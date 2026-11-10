@@ -406,3 +406,69 @@ nginx 看不到真实公网端口，只能用内部 `listen` 端口（8443/8180�
 | 宿主机 `ss -lntp` 查 8765 | 未监听（不裸暴露） | ✅ |
 | 旧 `/8000/` | 404 | ✅ |
 | 同机其他项目（主页 / watermelon / interview） | 未受影响 | ✅ |
+
+### 9.5 收藏导出接口对 draw 开放（白名单）
+
+§8.5 的遗留项已解决。draw 仓库的 `chattool-url-origin` 提交把硬编码的
+`http://127.0.0.1:8765` 改成按 `location` 推断：
+
+```js
+// draw/js/chattool.js
+服务器部署     → location.origin + CHATTOOL_PREFIX + '/api/favorites/draw'
+本机/file://   → http://127.0.0.1:8765/api/favorites/draw（保持原样）
+```
+
+这条修正是必要但不充分的。`/chat/` 挂着 Basic Auth，而 **draw 本身是公开页面**，
+用户打开 draw 时从没登录过 `/chat`，浏览器没有该 realm 的凭据缓存，
+`credentials: 'include'` 也无凭据可带 → 收藏接口回 401 + 弹框。实测：
+
+```
+GET /chat/api/favorites/draw （无凭据）→ 401  WWW-Authenticate: Basic realm="ChatTool"
+```
+
+三种解法中选了「只放开这一条只读接口」：
+
+| 方案 | 取舍 |
+|---|---|
+| draw 也加 Basic Auth | 最省事，但把公开的画布工具变成要密码的 |
+| **只放开收藏导出接口（采用）** | draw 无需登录；代价是该接口公开可读 |
+| token 校验 | 安全性最好，但要改两边代码，且 token 暴露在前端≈半公开 |
+
+风险评估：该接口返回的是用户勾选收藏的卡片文本（`doc` 节点标题 + 正文），
+**不含任何凭据**。可读写 LLM API Key 的 `/api/settings`、以及会话列表等
+仍全部要求认证。故泄露面可接受。
+
+Nginx 侧（`=` 精确匹配，优先级高于 `^~ /chat/`，确保不被吞掉）：
+
+```nginx
+location = /chat/api/favorites/draw {
+    auth_basic off;
+    proxy_pass http://chattool:8765/api/favorites/draw;
+    include /etc/nginx/conf.d/proxy_params;
+}
+location = /chat/api/favorites/draw.json {
+    auth_basic off;
+    proxy_pass http://chattool:8765/api/favorites/draw.json;
+    include /etc/nginx/conf.d/proxy_params;
+}
+location ^~ /chat/ {
+    auth_basic "ChatTool";
+    auth_basic_user_file /etc/nginx/conf.d/.htpasswd;
+    proxy_pass http://chattool:8765/;
+    include /etc/nginx/conf.d/proxy_params;
+}
+```
+
+验收：
+
+| 场景 | 结果 |
+|---|---|
+| `/chat/api/favorites/draw`（无凭据） | 200，返回画布数据 | ✅ |
+| `/chat/api/favorites/draw.json`（无凭据） | 200 | ✅ |
+| `/chat/`、`/api/settings`、`/api/conversations`、`/api/stats`（无凭据） | 全部 401 | ✅ |
+| 带 Auth 访问 `/chat/` | 200 | ✅ |
+| 其他项目（主页 / watermelon / draw） | 未受影响 | ✅ |
+
+端到端：`https://www.shuishen.cloud:8080/draw/` 页内推导出
+`https://www.shuishen.cloud:8080/chat/api/favorites/draw`，同源、无 CORS、
+无需登录，draw 可直接导入收藏。

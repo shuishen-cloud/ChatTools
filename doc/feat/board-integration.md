@@ -138,3 +138,32 @@ CREATE TABLE IF NOT EXISTS board_folder (
 6. 显式传 `w` 时不被建议值覆盖
 7. 前端：`sidebarb` tab 存在；`.bnode-text` 走 `MD.render` 而非 `esc`
 8. 前端：颜色面板存在（`bnode-palette`），不再只有循环逻辑
+
+## 7. 实现与校验结果
+
+**已落地**：
+
+- `board_folder` 多对多表 + `PUT/GET /api/boards/{id}/folders`，
+  与 `conv_folder` 完全同语义（全量替换）；
+- `board_node` 新增 `w` / `h`（默认 0 = 前端默认尺寸），
+  `_migrate_board_node_size()` 给旧库自动补列；
+- `recommend_width()` 按内容特征给建议值（短 232 / 长文或代码 320 / 表格超长行 400），
+  **只在 `w == 0` 时生效并落库**；
+- `_clamp_size()` 钳制 `w ∈ [120,900]`、`h ∈ [60,1200]`，非正数归 0；
+- `.bnode-text` 改用 `MD.render`，与对话共用同一渲染器；
+- 侧栏第 5 个 tab「画板」；`#modal-pick-board` 取代 `prompt` 输序号；颜色改预设色板。
+
+**校验**：
+
+```bash
+.venv/bin/python -m tests.test_board_integration   # 12 tests OK
+.venv/bin/python -m tests.test_api                 # 86 tests OK
+```
+
+**坑（已记笔记）**：
+
+| 坑 | 说明 |
+|---|---|
+| 引用消息时 `content` 为空 | `add_node` 的 `message_id` 分支正文从 `message` 表取，直接拿 `content` 算宽度会永远得到 232px，需单独取 `message.content` |
+| 0 不等于无效 | `w=0` 是「用户没拖过」的合法语义，不能被当成无意义值丢掉 |
+| 单独给画板引 Markdown 库 | 会让同一条消息在对话与画板长得不一样；复用 `MD.render` 才能保证一致 |

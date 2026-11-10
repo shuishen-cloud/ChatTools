@@ -201,3 +201,110 @@ scp /tmp/chattool-clean.db 服务器:~/apps/data/chattool/chattool.db
 - **不做本地↔服务器双向同步**：SQLite WAL 双向同步会损坏，服务器为唯一真源。
 - **不改 MutipleChat 的 `CHATTOOL_DRAW_URL`**：同源部署后 `/8000/api/favorites/draw`
   可达，但该地址需在 MutipleChat 侧另开一张票处理（本票只负责 ChatTool 上线）。
+
+---
+
+## 8. 实现与校验结果
+
+### 8.1 实测通过的验收项
+
+在本地以 `CHATTOOL_PREFIX=/8000` 启动（`python -m app --port 18765`），实测：
+
+```
+GET /            -> <link href="/8000/static/style.css">
+                    <script>window.__CT_PREFIX = "/8000";</script>
+                    <script src="/8000/static/app.js">
+GET /api/stats   -> {"ok":true,...}          （应用侧仍只认 /api/*）
+GET /static/app.js -> 200
+GET /8000/static/app.js -> 404               （前缀由 Nginx 剥离，有意为之）
+```
+
+| 验收 # | 结果 |
+|---|---|
+| 1 本机不设前缀，行为不变 | ✅ `test_01_no_prefix_keeps_root_paths`，且全量 140 项 unittest 通过 |
+| 2 设 /8000 后静态引用全带前缀 | ✅ `test_02_prefix_rewrites_all_static_refs` |
+| 3 无 `%%PREFIX%%` 残留 | ✅ `test_02` 内断言 |
+| 4 子路径下功能正常 | ✅ 见 8.1 实测 + 前端 5 处调用均有测试锁定 |
+| 5 分享链接带前缀且不落库 | ✅ `test_13` + `test_20` |
+| 6/7 端口与鉴权 | ⏳ 运维配置，见 8.3 |
+
+新增 12 项契约测试（`tests/test_deploy_prefix.py`），已挂进 `tests/run_all.sh`。
+
+### 8.2 一次真实回归
+
+`tests/theme.test.js` 里硬编码了 `src="/static/theme.js"`，加前缀后失败。
+这不是测试误报——它锁的正是"index.html 确实加载了 theme.js"这个事实。
+把正则改为前缀可选 `(?:%%PREFIX%%)?`，既保留原意图又兼容两种部署形态。
+
+### 8.3 服务器部署步骤（不进仓库）
+
+**1) 数据迁移**（本地 → 服务器，用 `.backup` 而非 `cp`，WAL 半写状态会坏库）
+
+```bash
+sqlite3 data/chattool.db ".backup /tmp/chattool-clean.db"
+scp /tmp/chattool-clean.db 服务器:~/apps/data/chattool/chattool.db
+```
+
+**2) compose**（`~/apps/docker-compose.yml`）
+
+```yaml
+services:
+  chattool:
+    build: ./ChatTools
+    restart: unless-stopped
+    ports: ["127.0.0.1:8765:8765"]      # 只绑本地，公网必须过 Nginx
+    volumes:
+      - ./data/chattool:/app/data       # 数据在容器外，重建不丢
+    environment:
+      - CHATTOOL_PREFIX=/8000
+      - CHATTOOL_CORS_ORIGINS=https://你的域名
+```
+
+**3) Nginx**
+
+```nginx
+location /8000/ {
+    auth_basic "ChatTools";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    proxy_pass http://127.0.0.1:8765/;   # ★ 尾斜杠必须成对
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_buffering off;                 # ★ SSE 流式生成必需
+    proxy_read_timeout 300s;
+}
+```
+
+`proxy_buffering off` 不设的后果：`/api/generate` 是 SSE，Nginx 默认攒够缓冲区才吐，
+手机上表现为"发完消息一直转圈，几十秒后一次全出来"，很像卡死。
+
+**4) 密码**
+
+```bash
+printf "lwy:%s\n" "$(openssl passwd -apr1 '你的密码')" > /etc/nginx/.htpasswd
+```
+
+**5) 上线与更新**
+
+```bash
+cd ~/apps && docker compose up -d --build chattool
+nginx -t && nginx -s reload
+
+# 后续更新
+cd ~/apps/ChatTools && git pull && cd ~/apps && docker compose up -d --build chattool
+```
+
+### 8.4 回滚
+
+```bash
+docker compose down chattool        # 停掉
+python -m app --port 8765           # 本机照常可用（本地库保留未动）
+```
+
+### 8.5 遗留
+
+- **MutipleChat 的 `CHATTOOL_DRAW_URL` 仍硬编码 `http://127.0.0.1:8765`**，
+  手机上必然失败。同源部署后应改为 `location.origin + '/8000/api/favorites/draw'`，
+  另开一张票处理，不在本票范围。

@@ -1340,6 +1340,55 @@ class ChatToolTest(unittest.TestCase):
         self.assertIn("这一条甲", nodes[0]["text"])
         self.assertNotIn("这一条乙", nodes[0]["text"])
 
+    def test_73b_board_node_size_is_freezable(self):
+        """画板卡片可调大小：w/h 可存可改，越界被钳制，0 = 默认。
+
+        背景：board_node 表早期没有 w/h，卡片宽度是 CSS 写死的 232px，
+        用户完全无法控制大小。这里锁住「存得住、改得动、不会变负」。
+        """
+        b = self._post("/api/boards", {"name": "尺寸板"})
+        bid = b["id"]
+        # 1) 新建时可直接带尺寸
+        n = self._post(f"/api/boards/{bid}/nodes",
+                       {"content": "卡", "w": 400, "h": 300})
+        self.assertEqual((n["w"], n["h"]), (400.0, 300.0))
+
+        # 2) PATCH 可改尺寸
+        r = self.client.patch(f"/api/board-nodes/{n['id']}",
+                              json={"w": 500, "h": 250}).json()["data"]
+        self.assertEqual((r["w"], r["h"]), (500.0, 250.0))
+
+        # 3) 越界钳制：过大封顶，非正数归 0（= 默认尺寸）
+        r = self.client.patch(f"/api/board-nodes/{n['id']}",
+                              json={"w": 9999, "h": -5}).json()["data"]
+        self.assertEqual(r["w"], 900.0)
+        self.assertEqual(r["h"], 0.0)
+
+        # 4) 0 是合法的「恢复默认」，不能被错当无意义值丢掉
+        r = self.client.patch(f"/api/board-nodes/{n['id']}",
+                              json={"w": 0, "h": 0}).json()["data"]
+        self.assertEqual((r["w"], r["h"]), (0.0, 0.0))
+
+        # 5) 重新读取仍然一致（真的落库了，不是只回显）
+        nodes = self.client.get(f"/api/boards/{bid}").json()["data"]["nodes"]
+        self.assertEqual(nodes[0]["w"], 0.0)
+
+    def test_73c_pick_board_uses_real_dialog_not_prompt(self):
+        """选画板必须是可点弹窗，不能再用 prompt 输序号。
+
+        旧实现 `prompt("输入序号")`：手机上 prompt 常被屏蔽，
+        而且只有一个画板时会静默塞进去，用户不知道进了哪块。
+        """
+        html = self.client.get("/").text
+        js = self.client.get("/static/panels.js").text
+        self.assertIn('id="modal-pick-board"', html)
+        self.assertIn('id="pick-board-list"', html)
+        # 弹窗里能当场新建
+        self.assertIn('id="pick-board-name"', html)
+        # panels.js 不得再出现「输入序号」式的 prompt
+        self.assertNotIn("加入哪个画板？输入序号", js)
+        self.assertIn("pick-board-list", js)
+
     def test_73_share_draw_downloads_as_file(self):
         """下载版返回附件头，中文文件名按 RFC 5987 编码。"""
         conv = self._post("/api/conversations", {"title": "下载分享"})

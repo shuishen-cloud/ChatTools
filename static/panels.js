@@ -571,6 +571,29 @@ const Board = (() => {
   const NODE_W = 232;
   const NODE_H = 130;   // 估算高度，用于连线锚点
 
+  /* ---- 视图记忆（对应 doc/feat/board-as-view.md §2.3） ----
+     chattool.view         当前一级视图 chat / board
+     chattool.board.open   已打开的画板 id（有序，去重）
+     chattool.board.active 上次用的画板（决定「＋ 画板」直接进哪里） */
+  const K_VIEW = "chattool.view";
+  const K_ACTIVE = "chattool.board.active";
+
+  function readLS(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw === null) return fallback;
+      return JSON.parse(raw);
+    } catch { return fallback; }
+  }
+  function writeLS(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* 隐私模式忽略 */ }
+  }
+  function activeBoardId() {
+    const v = readLS(K_ACTIVE, null);
+    return typeof v === "string" ? v : null;
+  }
+  function setActiveBoardId(id) { writeLS(K_ACTIVE, id || null); }
+
   /* 画板 SVG 用内联颜色（SVG 属性无法写 var()），
      所以从 CSS 变量里读出当前主题的色值，换肤后重绘即生效 */
   function skin() {
@@ -585,38 +608,381 @@ const Board = (() => {
     };
   }
 
+  /* ---- 统一 tab 模型：对话与画板共用一套 ----
+     chattool.tabs        [{kind:"chat"|"board", id}] 有序、去重
+     chattool.tab.active  {kind, id} 当前项
+     真身在 localStorage，这里用一个内存缓存减少 JSON 解析。 */
+  const K_TABS = "chattool.tabs";
+  const K_TAB_ACTIVE = "chattool.tab.active";
+
+  function readTabs() {
+    const v = readLS(K_TABS, []);
+    if (!Array.isArray(v)) return [];
+    return v.filter((t) => t && typeof t.id === "string"
+      && (t.kind === "chat" || t.kind === "board"));
+  }
+  function writeTabs(list) {
+    // 去重：同一 kind+id 只留最后一次
+    const seen = new Set();
+    const out = [];
+    for (const t of list) {
+      const k = `${t.kind}:${t.id}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ kind: t.kind, id: t.id });
+    }
+    writeLS(K_TABS, out);
+    return out;
+  }
+  function activeTab() {
+    const v = readLS(K_TAB_ACTIVE, null);
+    if (!v || typeof v.id !== "string") return null;
+    return { kind: v.kind === "board" ? "board" : "chat", id: v.id };
+  }
+  function setActiveTab(kind, id) { writeLS(K_TAB_ACTIVE, { kind, id }); }
+
+  /* 当前会话 id（从 app.js 的全局状态取，避免被本闭包的 state 遮蔽） */
+  function chatId() {
+    try {
+      const s = window.__chattoolAppState;
+      return (s && s.activeConv && s.activeConv.id) || null;
+    } catch { return null; }
+  }
+  function chatTitle(id) {
+    try {
+      const s = window.__chattoolAppState;
+      if (!s) return "对话";
+      if (s.activeConv && s.activeConv.id === id) return s.activeConv.title || "对话";
+      const c = (s.convs || []).find((x) => x.id === id);
+      return (c && c.title) || "对话";
+    } catch { return "对话"; }
+  }
+
+  /* 滚动位置记忆：只存内存（跨刷新不保留，避免“一打开就在中间”的怪异感） */
+  const scrollMemo = new Map();
+
+  /** 切走前记下阅读位置：优先用最靠上的可见消息作锚点 */
+  function saveScroll(convId) {
+    if (!convId) return;
+    const detail = $("#detail");
+    if (!detail) return;
+    let anchorId = null;
+    let best = Infinity;
+    document.querySelectorAll(".msg[data-id]").forEach((el) => {
+      const r = el.getBoundingClientRect();
+      const d = Math.abs(r.top - (detail.getBoundingClientRect().top + 8));
+      if (r.bottom > 0 && d < best) { best = d; anchorId = el.dataset.id; }
+    });
+    scrollMemo.set(convId, { top: detail.scrollTop, anchorId });
+  }
+
+  /** 切回来时恢复：锚点消息优先（消息高度会因图片/表格变化，纯像素会飘） */
+  function restoreScroll(convId) {
+    const memo = scrollMemo.get(convId);
+    const detail = $("#detail");
+    if (!memo || !detail) return false;
+    if (memo.anchorId) {
+      const el = document.querySelector(`.msg[data-id="${memo.anchorId}"]`);
+      if (el) {
+        el.scrollIntoView({ block: "start" });
+        // scrollIntoView 可能把标题栏也推走，退一点更自然
+        detail.scrollTop = Math.max(0, detail.scrollTop - 8);
+        return true;
+      }
+    }
+    detail.scrollTop = memo.top || 0;
+    return true;
+  }
+
+  /** 重绘顶部 tab（对话 + 画板共用） */
+  function renderTabs() {
+    const box = $("#vtab-list");
+    const bv = $("#boardview");
+    const curView = bv && !bv.hidden ? "board" : "chat";
+    const curId = curView === "board" ? (state.board?.id || activeBoardId()) : chatId();
+
+    if (!box) return;
+    const boards = Object.fromEntries((state.boards || []).map((b) => [b.id, b]));
+    const chats = Object.fromEntries(((window.__chattoolAppState?.convs) || [])
+      .map((c) => [c.id, c]));
+    const activeChat = window.__chattoolAppState?.activeConv;
+
+    // 剔除已失效的 tab：画板被删 / 会话被删
+    const alive = readTabs().filter((t) => {
+      if (t.kind === "board") return !!boards[t.id];
+      return !!chats[t.id] || (activeChat && activeChat.id === t.id);
+    });
+    if (alive.length !== readTabs().length) writeTabs(alive);
+
+    box.innerHTML = alive.map((t) => {
+      const on = curView === t.kind && curId === t.id;
+      const raw = t.kind === "board"
+        ? ((boards[t.id] && boards[t.id].name) || "画板")
+        : chatTitle(t.id);
+      const title = raw.length > 14 ? raw.slice(0, 14) + "…" : raw;
+      const icon = t.kind === "board" ? "🎨" : "💬";
+      return `<div class="vtab ${on ? "active" : ""}"
+                   data-tab-kind="${t.kind}" data-tab-id="${t.id}">
+          <span class="t">${icon} ${esc(title)}</span>
+          <button class="x" data-closetab="1" title="关闭">✕</button>
+        </div>`;
+    }).join("");
+
+    box.querySelectorAll("[data-tab-kind]").forEach((el) => {
+      el.onclick = (e) => {
+        if (e.target.closest("[data-closetab]")) return;
+        activateTab(el.dataset.tabKind, el.dataset.tabId);
+      };
+    });
+    box.querySelectorAll("[data-closetab]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const host = btn.closest("[data-tab-kind]");
+        if (host) closeTab(host.dataset.tabKind, host.dataset.tabId);
+      };
+    });
+  }
+
+  /** 激活任一种 tab */
+  async function activateTab(kind, id) {
+    if (kind === "board") return switchMainView("board", id);
+    return switchMainView("chat", id);
+  }
+
+  /** 会话标题（兼容旧调用）。
+   *  ⚠️ 本闭包内的 state 会遮蔽 app.js 的全局 state，必须走显式引用。 */
+  function convTitle() {
+    try {
+      const s = window.__chattoolAppState;
+      return (s && s.activeConv && s.activeConv.title) || "";
+    } catch { return ""; }
+  }
+
+  /** 一级视图切换：chat 时可指定具体会话 id */
+  async function switchMainView(view, idArg) {
+    const bv = $("#boardview");
+    const detail = $("#detail");
+    if (!bv || !detail) return;
+
+    if (view === "chat") {
+      const target = idArg || chatId();
+      const prev = chatId();
+      // 切走前先记住当前会话的阅读位置
+      if (prev && prev !== target) saveScroll(prev);
+
+      bv.hidden = true;
+      bv.classList.remove("fullscreen");
+      detail.hidden = false;
+      writeLS(K_VIEW, "chat");
+
+      if (target) {
+        writeTabs([...readTabs(), { kind: "chat", id: target }]);
+        setActiveTab("chat", target);
+        if (prev !== target) {
+          try { await openConv(target); } catch { /* 会话可能已被删 */ }
+        }
+        // openConv 重渲染了消息，渲染完再恢复位置
+        restoreScroll(target);
+      }
+      renderTabs();
+      return;
+    }
+
+    const id = idArg || activeBoardId();
+    if (!id) { switchMainView("chat"); return; }
+
+    // 从会话切到画板，也要记住会话位置
+    const prevChat = chatId();
+    if (prevChat) saveScroll(prevChat);
+
+    detail.hidden = true;
+    bv.hidden = false;
+    writeLS(K_VIEW, "board");
+    writeTabs([...readTabs(), { kind: "board", id }]);
+    setActiveTab("board", id);
+    setActiveBoardId(id);
+    await loadBoards({ applyActive: false });
+    await loadBoard(id).catch(() => {});
+    if ($("#board-select")) $("#board-select").value = id;
+    renderTabs();
+  }
+
+  /** 打开一个会话 tab（不重复） */
+  async function openChatTab(id) {
+    writeTabs([...readTabs(), { kind: "chat", id }]);
+    await switchMainView("chat", id);
+  }
+
+  /** 「＋」弹窗：同时列出会话与画板，选哪个开哪个 tab。
+   *
+   * 为什么不直接复用 pickBoard：那个是「把内容加入画板」的选择器，
+   * 语义是“目标画板”；这里的语义是“打开一个视图”，且还要列出会话。
+   * 两者共用一个弹窗 DOM，但入口与标题不同，避免用户误以为在选导出目标。
+   */
+  function openTabPicker() {
+    const modal = $("#modal-pick-board");
+    const list = $("#pick-board-list");
+    if (!modal || !list) return;
+
+    const convs = ((window.__chattoolAppState?.convs) || []).slice(0, 30);
+    const boards = state.boards || [];
+    const openSet = new Set(readTabs().map((t) => `${t.kind}:${t.id}`));
+
+    const item = (kind, id, name, meta) => {
+      const already = openSet.has(`${kind}:${id}`);
+      return `<button class="pick-board-item" data-kind="${kind}" data-id="${id}">
+          <span class="n">${kind === "board" ? "🎨 " : "💬 "}${esc(name)}</span>
+          <span class="c">${already ? "已打开" : esc(meta)}</span>
+        </button>`;
+    };
+
+    list.innerHTML =
+      (boards.length
+        ? `<div class="pick-sec">画板</div>`
+          + boards.map((b) => item("board", b.id, b.name, `${b.node_count || 0} 节点`)).join("")
+        : "")
+      + (convs.length
+        ? `<div class="pick-sec">会话</div>`
+          + convs.map((c) => item("chat", c.id, c.title, `${c.message_count || 0} 条`)).join("")
+        : "")
+      || `<p class="hint">还没有会话或画板。</p>`;
+
+    const h3 = modal.querySelector("h3");
+    if (h3) h3.textContent = "打开会话或画板";
+    // 这个入口不需要“新建画板”那块，隐藏掉，保持简洁
+    const newBox = modal.querySelector(".pick-board-new");
+    if (newBox) newBox.hidden = true;
+    $("#pick-board-name").value = "";
+    modal.hidden = false;
+
+    const finish = () => { modal.hidden = true; };
+    modal.onclick = (e) => { if (e.target === modal) finish(); };
+    $("#pick-board-cancel").onclick = finish;
+
+    list.onclick = async (e) => {
+      const b = e.target.closest(".pick-board-item");
+      if (!b) return;
+      finish();
+      if (b.dataset.kind === "board") await openBoardTab(b.dataset.id);
+      else await openChatTab(b.dataset.id);
+    };
+  }
+
+  /** 打开一个画板 tab（不重复） */
+  async function openBoardTab(id) {
+    writeTabs([...readTabs(), { kind: "board", id }]);
+    await switchMainView("board", id);
+  }
+
+  /** 关闭任一种 tab：关的是当前项才切走，回落到相邻项 */
+  async function closeTab(kind, id) {
+    const tabs = readTabs();
+    const idx = tabs.findIndex((t) => t.kind === kind && t.id === id);
+    const rest = tabs.filter((t) => !(t.kind === kind && t.id === id));
+    writeTabs(rest);
+
+    const act = activeTab();
+    const isCurrent = act && act.kind === kind && act.id === id;
+    if (!isCurrent) { renderTabs(); return; }
+
+    const fallback = rest[Math.min(idx < 0 ? 0 : idx, rest.length - 1)] || null;
+    if (fallback) {
+      await activateTab(fallback.kind, fallback.id);
+      return;
+    }
+
+    // 没有剩下任何 tab：不能把界面空着
+    if (kind === "board") {
+      // 关的是最后一个画板 tab → 回到对话（若连对话 tab 也没有就开一个）
+      const keep = chatId();
+      if (keep) await openChatTab(keep);
+      else await switchMainView("chat");
+    } else {
+      // 关掉最后一个会话 tab → 回原会话，或开一个新的
+      const keep = chatId();
+      if (keep && keep !== id) {
+        await openChatTab(keep);
+      } else if (typeof ensureConversation === "function") {
+        // 让 app.js 决定开哪个（复用“永不空白”的契约）
+        try {
+          window.__chattoolAppState.activeConv = null;
+          await ensureConversation();
+        } catch { /* 离线等情况：下面统一兜底 */ }
+        const nid = chatId();
+        if (nid) await openChatTab(nid);
+      }
+    }
+    // 兜底：若最终没有可用的当前项，清掉 active，避免刷新后恢复出一个已关闭的 tab
+    const finalAct = activeTab();
+    if (finalAct && !readTabs().some((t) => t.kind === finalAct.kind && t.id === finalAct.id)) {
+      writeLS(K_TAB_ACTIVE, null);
+    }
+    renderTabs();
+  }
+
+  /** 兼容旧调用：按画板 id 关 */
+  async function closeBoardTab(id) { return closeTab("board", id); }
+
   async function open() {
-    $("#boardview").hidden = false;
-    await loadBoards();
+    // 打开画板视图（默认进入上次用的画板）；一个画板都没有就建一个
+    const id = activeBoardId() || state.boards[0]?.id;
+    if (!id) {
+      const b = await api("/api/boards", { method: "POST", body: { name: "新画板" } });
+      await loadBoards();
+      return openBoardTab(b.id);
+    }
+    return openBoardTab(id);
   }
 
   function close() {
-    $("#boardview").hidden = true;
     if (state.dirty) loadConvListQuietly();
+    return switchMainView("chat");
   }
 
-  async function loadBoards() {
+  /** 全屏开关（可选增强，不改变“画板是视图”的语义） */
+  function toggleFullscreen() {
+    const bv = $("#boardview");
+    if (!bv) return;
+    bv.classList.toggle("fullscreen");
+    $("#btn-board-full")?.classList.toggle("on", bv.classList.contains("fullscreen"));
+  }
+
+  async function loadBoards({ applyActive = true } = {}) {
     state.boards = await api("/api/boards");
     const sel = $("#board-select");
-    sel.innerHTML = state.boards.map((b) =>
-      `<option value="${b.id}">${esc(b.name)}（${b.node_count}）</option>`).join("");
+    if (sel) {
+      sel.innerHTML = state.boards.map((b) =>
+        `<option value="${b.id}">${esc(b.name)}（${b.node_count}）</option>`).join("");
+    }
     if (!state.boards.length) {
       state.board = null;
+      setActiveBoardId(null);
       renderCanvas();
-      return;
+      renderTabs();
+      renderSidebarList();
+      return null;
     }
-    const keep = state.board && state.boards.find((b) => b.id === state.board.id);
-    const targetId = keep ? state.board.id : state.boards[0].id;
-    sel.value = targetId;
-    await loadBoard(targetId);
+    // 优先保持当前画板 → 其次上次用的 → 最后才回第一块
+    const cur = state.board && state.boards.find((b) => b.id === state.board.id);
+    const remembered = state.boards.find((b) => b.id === activeBoardId());
+    const targetId = (cur || remembered || state.boards[0]).id;
+    if (sel) sel.value = targetId;
+    // applyActive=false：只刷新清单，不改变「当前画板」
+    // （切换视图时会显式 loadBoard(id)，不能被这里覆盖回去）
+    if (applyActive && !state.board) setActiveBoardId(targetId);
+    renderSidebarList();
+    return targetId;
   }
 
   async function loadBoard(id) {
     state.board = await api(`/api/boards/${id}`);
     state.selected = null;
     state.linkFrom = null;
+    setActiveBoardId(id);   // 记住当前画板（下次打开直接回来）
     $("#board-name").value = state.board.name || "";
     renderCanvas();
+    renderTabs();
+    renderSidebarList();
   }
 
   async function createBoard() {
@@ -643,9 +1009,16 @@ const Board = (() => {
     const nodes = state.board.nodes || [];
     empty.hidden = nodes.length > 0;
 
-    nodesBox.innerHTML = nodes.map((n) => `
-      <div class="bnode ${state.selected === n.id ? "selected" : ""}"
-           data-id="${n.id}" style="left:${n.x}px;top:${n.y}px;border-left-color:${n.color}">
+    nodesBox.innerHTML = nodes.map((n) => {
+      // 0 = 未手动调整，交给 CSS 默认值；否则用存下的尺寸
+      const size = [
+        n.w > 0 ? `width:${n.w}px` : "",
+        n.h > 0 ? `height:${n.h}px` : "",
+      ].filter(Boolean).join(";");
+      return `
+      <div class="bnode ${state.selected === n.id ? "selected" : ""} ${n.h > 0 ? "sized" : ""}"
+           data-id="${n.id}"
+           style="left:${n.x}px;top:${n.y}px;border-left-color:${n.color};${size}">
         <div class="bnode-meta">
           <span>${roleIcon(n.role)}</span>
           <span class="src">${esc(n.conv_title
@@ -654,18 +1027,161 @@ const Board = (() => {
         </div>
         <div class="bnode-note" contenteditable="true"
              data-id="${n.id}">${esc(n.note)}</div>
-        <div class="bnode-text">${esc(n.content || "（内容不可用）")}</div>
+        <div class="bnode-text md">${n.content
+          ? MD.render(n.content)
+          : '<span class="hint">（内容不可用）</span>'}</div>
         <div class="bnode-tools">
           <button data-act="open" data-id="${n.id}" data-conv="${n.conv_id || ""}">查看原文</button>
           <button data-act="color" data-id="${n.id}">颜色</button>
           <button data-act="remove" data-id="${n.id}">移出</button>
         </div>
+        <div class="bnode-resize" title="拖动调整卡片大小（双击恢复默认）"></div>
         <div class="bnode-port" title="从这里拖到另一个节点，建立关系"></div>
-      </div>`).join("");
+      </div>`;
+    }).join("");
 
     bindNodes();
     renderEdges();
     updateHint();
+  }
+
+  /* 预设色板：与文件夹 chip 用同一套色，视觉统一。
+     旧实现是「循环切到下一个色」，用户得点好几次才知道有没有想要的——
+     这里直接列出全部，点哪个是哪个。 */
+  const NODE_COLORS = [
+    { v: "#6b8afd", name: "蓝" },
+    { v: "#37c98b", name: "绿" },
+    { v: "#e8c15a", name: "黄" },
+    { v: "#e2606b", name: "红" },
+    { v: "#b57ce0", name: "紫" },
+  ];
+
+  function openPalette(anchor, nodeId) {
+    let pop = $("#bnode-palette");
+    if (!pop) {
+      pop = document.createElement("div");
+      pop.id = "bnode-palette";
+      pop.className = "bnode-palette";
+      document.body.appendChild(pop);
+    }
+    const cur = state.board?.nodes?.find((n) => n.id === nodeId)?.color;
+    pop.innerHTML = NODE_COLORS.map((c) =>
+      `<button class="sw ${c.v === cur ? "on" : ""}" data-color="${c.v}"
+               title="${c.name}" style="background:${c.v}"></button>`).join("");
+
+    const r = anchor.getBoundingClientRect();
+    pop.hidden = false;
+    pop.style.position = "fixed";
+    const w = pop.offsetWidth || 150;
+    pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+    pop.style.top = `${Math.max(8, r.top - (pop.offsetHeight || 36) - 6)}px`;
+
+    pop.onclick = async (e) => {
+      const b = e.target.closest("[data-color]");
+      if (!b) return;
+      await api(`/api/board-nodes/${nodeId}`,
+        { method: "PATCH", body: { color: b.dataset.color } });
+      pop.hidden = true;
+      await loadBoard(state.board.id);
+    };
+    if (!pop.dataset.bound) {
+      pop.dataset.bound = "1";
+      document.addEventListener("click", (e) => {
+        if (!pop.hidden && !pop.contains(e.target)
+            && !e.target.closest('[data-act="color"]')) pop.hidden = true;
+      });
+    }
+  }
+
+  /* ---- 侧栏画板列表：与「会话」一致的组织方式 ---- */
+  function renderSidebarList() {
+    const box = $("#board-list");
+    if (!box) return;
+    const kw = ($("#global-search")?.value || "").trim().toLowerCase();
+    const list = (state.boards || []).filter(
+      (b) => !kw || (b.name || "").toLowerCase().includes(kw));
+    if (!list.length) {
+      box.innerHTML = `<p class="hint">${kw
+        ? "没有匹配的画板。"
+        : "还没有画板。点上方「＋ 新建」创建，或在消息里点「＋ 画板」把内容搬进来。"}</p>`;
+      return;
+    }
+    const cur = state.board?.id;
+    box.innerHTML = list.map((b) => {
+      const chips = (b.folders || []).map((f) =>
+        `<span class="chip"><i class="dot" style="background:${f.color}"></i>${esc(f.name)}</span>`
+      ).join("");
+      return `<div class="board-item ${cur === b.id ? "active" : ""}" data-id="${b.id}">
+          <div class="board-row">
+            <div class="t">🎨 ${esc(b.name)}</div>
+            <button class="conv-more-btn" data-board-menu="${b.id}"
+                    title="重命名 / 归类" aria-label="画板操作">⋯</button>
+          </div>
+          <div class="meta">
+            <span>${b.node_count || 0} 节点</span>
+            <span>${b.edge_count || 0} 关系</span>
+            ${chips}
+          </div>
+        </div>`;
+    }).join("");
+
+    box.querySelectorAll(".board-item").forEach((el) => {
+      el.onclick = (e) => {
+        if (e.target.closest("[data-board-menu]")) return;
+        openBoardTab(el.dataset.id);
+      };
+    });
+    box.querySelectorAll("[data-board-menu]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); showBoardMenu(btn.dataset.boardMenu); };
+    });
+  }
+
+  /** 画板操作：重命名 / 归类到文件夹 */
+  function showBoardMenu(boardId) {
+    const b = (state.boards || []).find((x) => x.id === boardId);
+    if (!b) return;
+    openBoardFolderPicker(b);
+  }
+
+  /** 把画板归类到文件夹（复用会话那套概念，多对多） */
+  async function openBoardFolderPicker(board) {
+    const modal = $("#modal-folders");
+    if (!modal) return;
+    let all = [];
+    try { all = await api("/api/folders"); } catch { /* 离线 */ }
+    const cur = new Set((board.folders || []).map((f) => f.id));
+    $("#modal-folder-list").innerHTML = all.length
+      ? all.map((f) => `
+          <label><input type="checkbox" value="${f.id}" ${cur.has(f.id) ? "checked" : ""}>
+            <i class="dot" style="background:${f.color}"></i>${esc(f.name)}
+            <span class="cnt" style="margin-left:auto;color:var(--dim);font-size:11px">${f.total ?? 0}</span>
+          </label>`).join("")
+        + `<p class="hint">画板可同时归入多个文件夹，与会话一致。</p>`
+      : `<p class="hint">还没有文件夹，先到侧栏「文件夹」标签创建。</p>`;
+
+    const h3 = modal.querySelector("h3");
+    if (h3) h3.textContent = `归类画板「${board.name}」`;
+    modal.hidden = false;
+
+    const foot = modal.querySelector(".modal-foot");
+    foot.innerHTML = "";
+    const close = document.createElement("button");
+    close.className = "btn ghost";
+    close.textContent = "关闭";
+    close.onclick = () => (modal.hidden = true);
+    const save = document.createElement("button");
+    save.className = "btn primary";
+    save.textContent = "保存";
+    save.onclick = async () => {
+      const ids = [...modal.querySelectorAll("#modal-folder-list input:checked")]
+        .map((i) => i.value);
+      await api(`/api/boards/${board.id}/folders`,
+        { method: "PUT", body: { folder_ids: ids } });
+      modal.hidden = true;
+      await loadBoards();
+      toast("已更新归类");
+    };
+    foot.append(close, save);
   }
 
   function roleIcon(role) {
@@ -695,9 +1211,10 @@ const Board = (() => {
 
       /* ---------- 拖动移动 ---------- */
       el.addEventListener("pointerdown", (e) => {
-        // 编辑备注、点工具按钮、拉连接点时不触发移动
+        // 编辑备注、点工具按钮、拉连接点、拖尺寸时不触发移动
         if (e.target.closest(".bnode-tools")) return;
         if (e.target.closest(".bnode-port")) return;
+        if (e.target.closest(".bnode-resize")) return;
         if (e.target.isContentEditable) return;
         if (state.linkMode) return;
         if (!node()) return;
@@ -756,6 +1273,70 @@ const Board = (() => {
         document.addEventListener("pointerup", onUp);
       });
 
+      /* ---------- 拖动右下角调整卡片尺寸 ---------- */
+      const resizeEl = el.querySelector(".bnode-resize");
+      if (resizeEl) {
+        resizeEl.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();   // 不能冒泡到移动逻辑，否则拖尺寸会同时挪位置
+          const n = node();
+          if (!n) return;
+          const d = {
+            id,
+            startX: e.clientX,
+            startY: e.clientY,
+            origW: n.w > 0 ? n.w : el.offsetWidth,
+            origH: n.h > 0 ? n.h : el.offsetHeight,
+          };
+          el.classList.add("resizing");
+          try { resizeEl.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
+
+          const onMove = (ev) => {
+            const n2 = node();
+            if (!n2) return;
+            // 下限与后端的钳制保持一致，避免拖出负尺寸
+            n2.w = Math.max(120, Math.min(900, d.origW + ev.clientX - d.startX));
+            n2.h = Math.max(60, Math.min(1200, d.origH + ev.clientY - d.startY));
+            el.style.width = `${n2.w}px`;
+            el.style.height = `${n2.h}px`;
+            el.classList.add("sized");
+            renderEdges();   // 连线端点跟着卡片边缘走
+          };
+
+          const onUp = async () => {
+            document.removeEventListener("pointermove", onMove);
+            document.removeEventListener("pointerup", onUp);
+            el.classList.remove("resizing");
+            const n2 = node();
+            if (!n2) return;
+            try {
+              await api(`/api/board-nodes/${id}`,
+                { method: "PATCH", body: { w: n2.w, h: n2.h } });
+            } catch (err) {
+              toast("保存尺寸失败：" + err.message);
+            }
+          };
+
+          document.addEventListener("pointermove", onMove);
+          document.addEventListener("pointerup", onUp);
+        });
+
+        // 双击恢复默认尺寸
+        resizeEl.addEventListener("dblclick", async (e) => {
+          e.stopPropagation();
+          const n = node();
+          if (!n) return;
+          n.w = 0;
+          n.h = 0;
+          el.style.width = "";
+          el.style.height = "";
+          el.classList.remove("sized");
+          renderEdges();
+          await api(`/api/board-nodes/${id}`, { method: "PATCH", body: { w: 0, h: 0 } });
+          toast("已恢复默认大小");
+        });
+      }
+
       /* ---------- 已存节点的备注编辑 ---------- */
       const noteEl = el.querySelector(".bnode-note");
       if (noteEl) {
@@ -789,12 +1370,7 @@ const Board = (() => {
           await openConv(convId);
         }
         if (act === "color") {
-          const colors = ["#6b8afd", "#37c98b", "#e8c15a", "#e2606b", "#b57ce0"];
-          const n = node();
-          const idx = colors.indexOf(n.color);
-          const next = colors[(idx + 1) % colors.length];
-          await api(`/api/board-nodes/${id}`, { method: "PATCH", body: { color: next } });
-          await loadBoard(state.board.id);
+          openPalette(btn, id);
         }
       });
 
@@ -971,46 +1547,108 @@ const Board = (() => {
   }
 
   /** 从消息底部按钮调用 */
-  /** 选择目标画板（没有就新建）。返回 board id 或 null。 */
-  async function pickBoard() {
-    if (!state.boards.length) {
-      const name = prompt("还没有画板，先建一个：", "新画板");
-      if (!name) return null;
-      const b = await api("/api/boards", { method: "POST", body: { name } });
-      await loadBoards();
-      return b.id;
-    }
-    if (state.boards.length === 1) {
-      return state.board?.id || state.boards[0].id;
-    }
-    const options = state.boards.map((b, i) => `${i + 1}. ${b.name}`).join("\n");
-    const pick = prompt(`加入哪个画板？输入序号：\n${options}`, "1");
-    if (!pick) return null;
-    const idx = parseInt(pick, 10) - 1;
-    if (Number.isNaN(idx) || !state.boards[idx]) {
-      toast("序号无效");
-      return null;
-    }
-    return state.boards[idx].id;
+  /** 选择目标画板：真实弹窗选择（而不是 prompt 输序号）。
+   *
+   * 旧实现用 `prompt("输入序号")`：手机上 prompt 常被浏览器屏蔽，
+   * 而且让用户记序号、数序号，既慢又容易选错。这里改成可点的列表，
+   * 并且支持当场新建。只有一个画板时也明确提示进了哪块，不静默塞进去。
+   */
+  function pickBoard() {
+    return new Promise((resolve) => {
+      const modal = $("#modal-pick-board");
+      const list = $("#pick-board-list");
+      const newInput = $("#pick-board-name");
+      if (!modal || !list) { resolve(null); return; }
+
+      let done = false;
+      const finish = (val) => {
+        if (done) return;
+        done = true;
+        modal.hidden = true;
+        modal.onclick = null;
+        resolve(val);
+      };
+
+      const render = () => {
+        const bs = state.boards || [];
+        list.innerHTML = bs.length
+          ? bs.map((b) => `
+              <button class="pick-board-item" data-id="${b.id}">
+                <span class="n">${esc(b.name)}</span>
+                <span class="c">${b.node_count || 0} 节点</span>
+              </button>`).join("")
+          : `<p class="hint">还没有画板，在下面输入名称新建一个。</p>`;
+      };
+      render();
+      newInput.value = "";
+
+      list.onclick = (e) => {
+        const b = e.target.closest(".pick-board-item");
+        if (!b) return;
+        finish(b.dataset.id);
+      };
+      modal.onclick = (e) => { if (e.target === modal) finish(null); };
+      $("#pick-board-cancel").onclick = () => finish(null);
+      $("#pick-board-ok").onclick = async () => {
+        const name = newInput.value.trim();
+        if (!name) { finish(null); return; }
+        const b = await api("/api/boards", { method: "POST", body: { name } });
+        await loadBoards();
+        finish(b.id);
+      };
+      newInput.onkeydown = (e) => { if (e.key === "Enter") $("#pick-board-ok").click(); };
+      // Esc 也要正确 resolve，否则 Promise 永远挂着（全局 Esc 只会隐藏 modal）
+      modal.onkeydown = (e) => { if (e.key === "Escape") finish(null); };
+
+      modal.hidden = false;
+      // 只有一个画板时自动选中它，但仍让用户看到“要进哪里”，可直接回车确认
+      if ((state.boards || []).length === 1) {
+        list.querySelector(".pick-board-item")?.classList.add("active");
+      }
+      setTimeout(() => newInput.focus(), 30);
+    });
   }
 
-  async function _insert(payload) {
-    const targetId = await pickBoard();
+  /** 把节点插入指定/选定画板。
+   *
+   * 体验修正：以前每次都弹窗，连加 10 条要弹 10 次。
+   * 现在优先直接加入「上次用的画板」；只有没记忆时才弹窗。
+   * forcePick = true 时强制弹窗（菜单里的「加入其他画板…」）。
+   */
+  async function _insert(payload, { forcePick = false } = {}) {
+    // 先确保画板列表是最新的（可能刚在别处新建过）
+    try { await loadBoards(); } catch { /* 离线时沿用现有列表 */ }
+
+    let targetId = null;
+    if (!forcePick) {
+      const remembered = activeBoardId();
+      if (remembered && (state.boards || []).some((b) => b.id === remembered)) {
+        targetId = remembered;
+      }
+    }
+    if (!targetId) targetId = await pickBoard();
     if (!targetId) return;
-    await api(`/api/boards/${targetId}/nodes`, { method: "POST", body: payload });
+
+    const res = await api(`/api/boards/${targetId}/nodes`, { method: "POST", body: payload });
     state.dirty = true;
+    // 加入后让它出现在 tab 上（统一 tab 模型）
+    writeTabs([...readTabs(), { kind: "board", id: targetId }]);
+    setActiveBoardId(targetId);
     if (state.board?.id === targetId) await loadBoard(targetId);
-    toast("已加入画板，点顶部「画板」查看");
+    const name = (state.boards || []).find((b) => b.id === targetId)?.name || "画板";
+    toast(`已加入「${name}」`, 2200);
+    renderTabs();
+    return res;
   }
 
   /** 把一条消息加入画板 */
-  async function addMessage(messageId, convId) {
-    return _insert({ message_id: messageId, conv_id: convId });
+  async function addMessage(messageId, convId, opts) {
+    return _insert({ message_id: messageId, conv_id: convId }, opts);
   }
 
   /** 把一段自由文本加入画板（不需要任何会话） */
-  async function addText(content, note) {
-    return _insert({ content, note: note || "" });
+  async function addText(content, note, opts) {
+    return _insert({ content, note: note || "" }, opts);
   }
 
   async function loadConvListQuietly() {
@@ -1021,10 +1659,23 @@ const Board = (() => {
   }
 
   function bind() {
-    $("#btn-board").onclick = open;
-    $("#btn-board-close").onclick = close;
-    $("#btn-board-new").onclick = createBoard;
-    $("#btn-board-export").onclick = () => {
+    const safe = (sel, ev, fn) => {
+      const el = $(sel);
+      if (!el) { console.warn(`[ChatTools/board] 找不到 ${sel}`); return; }
+      el.addEventListener(ev, fn);
+    };
+
+    safe("#btn-board", "click", () => open());
+    safe("#btn-board-new", "click", createBoard);
+    safe("#btn-board-full", "click", toggleFullscreen);
+    // 对话 tab：切回聊天
+    // tab 条上的「＋」：可开会话，也可开画板
+    safe("#btn-vtab-add", "click", async () => {
+      try { await loadBoards(); } catch { /* 离线 */ }
+      openTabPicker();
+    });
+
+    safe("#btn-board-export", "click", () => {
       if (!state.board) return toast("先选择一个画板");
       const a = document.createElement("a");
       a.href = `/api/boards/${state.board.id}/export`;
@@ -1032,23 +1683,29 @@ const Board = (() => {
       document.body.appendChild(a);
       a.click();
       a.remove();
-    };
-    $("#btn-board-link").onclick = () => {
+    });
+    safe("#btn-board-link", "click", () => {
       state.linkMode = !state.linkMode;
       state.linkFrom = null;
       $("#board-nodes").querySelectorAll(".bnode")
         .forEach((el) => el.classList.toggle("linkable", state.linkMode));
       updateHint();
-    };
-    $("#board-select").onchange = (e) => loadBoard(e.target.value);
-    $("#board-name").onchange = async (e) => {
+    });
+    // 下拉切换画板：当打开新 tab 看待
+    safe("#board-select", "change", (e) => openBoardTab(e.target.value));
+    safe("#board-name", "change", async (e) => {
       if (!state.board) return;
       await api(`/api/boards/${state.board.id}`,
         { method: "PATCH", body: { name: e.target.value } });
       await loadBoards();
-    };
+      renderTabs();
+    });
+
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && $("#boardview").hidden === false) {
+      const bv = $("#boardview");
+      if (!bv || bv.hidden) return;
+      if (e.key === "Escape") {
+        if (bv.classList.contains("fullscreen")) { toggleFullscreen(); return; }
         if (state.linkMode && state.linkFrom) {
           state.linkFrom = null;
           updateHint();
@@ -1059,6 +1716,12 @@ const Board = (() => {
             .forEach((el) => el.classList.remove("linkable"));
           updateHint();
         }
+      }
+      // F：全屏 / 退出全屏
+      if ((e.key === "f" || e.key === "F") && !e.target.isContentEditable
+          && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) {
+        e.preventDefault();
+        toggleFullscreen();
       }
     });
 
@@ -1076,5 +1739,34 @@ const Board = (() => {
     if (state.board) renderEdges();
   }
 
-  return { bind, open, close, addMessage, addText, loadBoards, refresh };
+  /** 「＋ 画板」按钮的入口：记忆优先进上次的画板，不每次都弹窗 */
+  async function addToActiveBoard(messageId, convId) {
+    return _insert({ message_id: messageId, conv_id: convId });
+  }
+
+  /** 恢复上次的一级视图（刷新后不丢位置） */
+  async function restoreView() {
+    try { await loadBoards(); } catch { /* 离线则停 chat */ }
+    const view = readLS(K_VIEW, "chat");
+    const act = activeTab();
+    const boardId = (act && act.kind === "board" ? act.id : null) || activeBoardId();
+
+    if (view === "board" && boardId && (state.boards || []).some((b) => b.id === boardId)) {
+      await switchMainView("board", boardId);
+    } else if (act && act.kind === "chat" && act.id) {
+      // 上次停在某个对话 tab → 恢复它（app.js 已加载该会话时不再重复拉取）
+      await switchMainView("chat", act.id);
+    } else {
+      await switchMainView("chat");
+    }
+  }
+
+  return {
+    bind, open, close, addMessage, addText, addToActiveBoard,
+    loadBoards, refresh, renderTabs, switchMainView, openBoardTab,
+    openChatTab, closeTab, closeBoardTab, activateTab,
+    saveScroll, restoreScroll,
+    restoreView, toggleFullscreen, renderSidebarList,
+    openBoardFolderPicker,
+  };
 })();

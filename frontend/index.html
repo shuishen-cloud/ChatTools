@@ -22,13 +22,21 @@
 <div id="app">
   <!-- 顶部栏 -->
   <header class="topbar">
-    <button class="icon-btn only-mobile" id="btn-menu" aria-label="菜单">☰</button>
+    <button class="icon-btn" id="btn-menu" aria-label="侧栏" aria-expanded="true"
+            title="收起侧栏">☰</button>
     <div class="brand">ChatTool</div>
-    <input id="global-search" class="search" placeholder="搜索会话 / 消息…" autocomplete="off">
-    <button class="btn ghost" id="btn-import">导入</button>
-    <button class="btn primary" id="btn-new">＋ 新会话</button>
-    <button class="btn ghost" id="btn-board" title="画板">画板</button>
-    <button class="btn ghost" id="btn-thread" title="对话历史">历史</button>
+    <input id="global-search" class="search" placeholder="搜索…" autocomplete="off">
+    <button class="btn primary" id="btn-new" title="新会话" aria-label="新会话">＋</button>
+    <span class="more-wrap">
+      <button class="btn ghost" id="btn-top-more" title="更多"
+              aria-label="更多" aria-haspopup="true" aria-expanded="false">⋯</button>
+      <div class="theme-menu more-menu" id="top-more-menu" role="menu">
+        <button id="btn-import" role="menuitem">导入</button>
+        <button id="btn-board" role="menuitem">画板</button>
+        <button id="btn-thread" role="menuitem">历史栏</button>
+        <button id="btn-snippets" role="menuitem">提问记录</button>
+      </div>
+    </span>
     <span class="theme-wrap">
       <button class="btn ghost theme-btn" id="btn-theme" title="白天 / 黑夜模式"
               aria-label="切换白天黑夜模式" aria-haspopup="true" aria-expanded="false">
@@ -51,6 +59,7 @@
         <button class="tab active" data-view="conversations">会话</button>
         <button class="tab" data-view="folders">文件夹</button>
         <button class="tab" data-view="favorites">收藏</button>
+        <button class="tab" data-view="boards">画板</button>
         <button class="tab" data-view="archive">归档</button>
       </nav>
 
@@ -61,6 +70,15 @@
         </div>
         <div id="conv-list" class="conv-list"></div>
         <p class="hint">长按会话（或点 ⋯）可重命名、归档、删除。</p>
+      </section>
+
+      <section class="pane" data-pane="boards">
+        <div class="pane-head">
+          <span>画板</span>
+          <button class="mini" id="btn-new-board">＋ 新建</button>
+        </div>
+        <div id="board-list" class="board-list"></div>
+        <p class="hint">点画板即可在右侧打开；可在 ⋯ 里归类到文件夹。</p>
       </section>
 
       <section class="pane" data-pane="archive">
@@ -93,6 +111,13 @@
 
     <!-- 主区 -->
     <main class="main" id="main">
+      <!-- 一级视图 tab：对话与画板共用一套（由 renderTabs 动态生成） -->
+      <nav class="viewtabs" id="viewtabs" role="tablist">
+        <div class="vtab-list" id="vtab-list"></div>
+        <button class="vtab-add" id="btn-vtab-add" title="打开会话或画板"
+                aria-label="打开会话或画板" aria-haspopup="true" aria-expanded="false">＋</button>
+      </nav>
+
       <div class="detail" id="detail">
         <div class="detail-head">
           <div class="title-wrap">
@@ -100,8 +125,6 @@
             <div class="chips" id="conv-folders"></div>
           </div>
           <div class="actions">
-            <button class="btn ghost" id="btn-archive">归档</button>
-            <button class="btn ghost" id="btn-snippets">提问记录</button>
             <button class="btn ghost" id="btn-share">分享</button>
             <div class="dropdown">
               <button class="btn ghost" id="btn-export">导出 ▾</button>
@@ -114,9 +137,8 @@
                 <button data-fmt="md" data-branch="1">仅当前分支 · Markdown</button>
               </div>
             </div>
-            <button class="btn danger ghost" id="btn-del-conv">删除</button>
-            <button class="btn ghost conv-more-hide-sm" id="btn-conv-more"
-                    title="更多操作（重命名 / 归档 / 删除）"
+            <button class="btn ghost" id="btn-conv-more"
+                    title="重命名 / 归档 / 删除"
                     aria-label="更多操作" aria-haspopup="true" aria-expanded="false">⋯</button>
           </div>
         </div>
@@ -133,6 +155,12 @@
         </div>
 
         <div class="composer">
+          <div class="composer-main">
+            <textarea id="composer-input" rows="1"
+              placeholder="输入消息…" title="Ctrl/⌘+Enter 发送"></textarea>
+            <button class="btn primary" id="btn-send" title="发送并要求 AI 回复">发送</button>
+            <button class="btn ghost" id="btn-stop" hidden>停止</button>
+          </div>
           <div class="composer-tools">
             <select id="composer-provider" title="服务商"></select>
             <select id="composer-model" title="模型"></select>
@@ -143,12 +171,29 @@
               <option value="system">系统</option>
               <option value="tool">工具</option>
             </select>
+            <button class="mini" id="btn-send-only" title="只保存消息，不请求回复">仅存</button>
           </div>
-          <div class="composer-main">
-            <textarea id="composer-input" rows="1" placeholder="输入消息… (Ctrl/⌘+Enter 发送并请求回复)"></textarea>
-            <button class="btn primary" id="btn-send" title="发送并要求 AI 回复">发送</button>
-            <button class="btn ghost" id="btn-send-only" title="只保存消息，不请求回复">仅存</button>
-            <button class="btn ghost" id="btn-stop" hidden>停止</button>
+        </div>
+      </div>
+
+      <!-- 画板视图：与 #detail 同级互斥，不再是全屏遮罩 -->
+      <div class="boardview" id="boardview" hidden>
+        <div class="board-top">
+          <select id="board-select"></select>
+          <button class="btn ghost" id="btn-board-new">＋ 新建</button>
+          <input id="board-name" class="board-name" placeholder="画板名称">
+          <span class="board-hint" id="board-hint"></span>
+          <button class="btn ghost" id="btn-board-link" title="也可以直接拖节点右侧圆点连线">点选连线</button>
+          <button class="btn ghost" id="btn-board-export">导出</button>
+          <button class="btn ghost" id="btn-board-full" title="全屏（F）">全屏</button>
+        </div>
+        <div class="board-canvas" id="board-canvas">
+          <svg class="board-svg" id="board-svg"></svg>
+          <div class="board-nodes" id="board-nodes"></div>
+          <div class="board-empty" id="board-empty">
+            <p>画板是空的。</p>
+            <p class="hint">在任意消息底部点「＋ 画板」，即可把内容搬到这块画布上，
+            把节点右侧的圆点拖到另一个节点上，即可写出它们之间的关系。</p>
           </div>
         </div>
       </div>
@@ -169,28 +214,6 @@
 <!-- 悬浮提问浮层 -->
 <div class="ask-bubble" id="ask-bubble" hidden>
   <button data-act="ask-selection">💬 就此提问</button>
-</div>
-
-<!-- 画板视图（全屏遮罩） -->
-<div class="boardview" id="boardview" hidden>
-  <div class="board-top">
-    <select id="board-select"></select>
-    <button class="btn ghost" id="btn-board-new">＋ 新建</button>
-    <input id="board-name" class="board-name" placeholder="画板名称">
-    <span class="board-hint" id="board-hint"></span>
-    <button class="btn ghost" id="btn-board-link" title="也可以直接拖节点右侧圆点连线">点选连线</button>
-    <button class="btn ghost" id="btn-board-export">导出</button>
-    <button class="btn ghost" id="btn-board-close">关闭</button>
-  </div>
-  <div class="board-canvas" id="board-canvas">
-    <svg class="board-svg" id="board-svg"></svg>
-    <div class="board-nodes" id="board-nodes"></div>
-    <div class="board-empty" id="board-empty">
-      <p>画板是空的。</p>
-      <p class="hint">在任意消息底部点「＋ 加入画板」，即可把内容搬到这块画布上，
-      把节点右侧的圆点拖到另一个节点上，即可写出它们之间的关系。</p>
-    </div>
-  </div>
 </div>
 
 <!-- 会话归属文件夹的弹窗 -->
@@ -239,6 +262,21 @@
     <div id="provider-form"></div>
     <div class="modal-foot">
       <button class="btn ghost" data-close>关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 选择目标画板 -->
+<div class="modal" id="modal-pick-board" hidden>
+  <div class="modal-box">
+    <h3>加入哪个画板？</h3>
+    <div id="pick-board-list" class="pick-board-list"></div>
+    <div class="pick-board-new">
+      <input id="pick-board-name" placeholder="或新建一个画板…" autocomplete="off">
+      <button class="btn primary" id="pick-board-ok">新建并加入</button>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="pick-board-cancel">取消</button>
     </div>
   </div>
 </div>

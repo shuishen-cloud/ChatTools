@@ -320,3 +320,89 @@ python -m app --port 8765           # 本机照常可用（本地库保留未动
 
 笔记：`00f0ad6` 记 2 条（漏拼前缀的高危坑、前缀剥离交给 Nginx 的可控异常），
 `dc63c6a` 记 1 条（改公共路径会连带打挂既有测试）。
+
+---
+
+## 9. 实际部署记录（与上文设计的差异）
+
+上文 §1–§8 是设计规格与当时（挂在 `/8000`）的实施记录，保留原样作为决策留痕。
+真正上线时有两处偏离，以本节为准。
+
+### 9.1 子路径是 `/chat` 不是 `/8000`
+
+`/8000` 只是个临时占位名，上线定为 `/chat`。代码无需改动，前缀本来就走
+`CHATTOOL_PREFIX` 环境变量（见 §2.1 选 A 的收益）：只改 compose 一行。
+
+```yaml
+environment:
+  CHATTOOL_PREFIX: /chat
+```
+
+### 9.2 不绑 `127.0.0.1:8765`，改走 compose 服务名
+
+§3.3 / §8.3 假设服务器用 `ports: ["127.0.0.1:8765:8765"]` + 独立 nginx。
+团队服务器的既有约定是所有容器 `expose` 端口、由同一个 nginx 容器按服务名反代，
+不往宿主机绑端口。因此实际是：
+
+```yaml
+chattool:
+  build: ./projects/ChatTools
+  restart: unless-stopped
+  environment:
+    CHATTOOL_PREFIX: /chat
+    CHATTOOL_DATA: /app/data
+  expose: ["8765"]        # 应用监听 8765（Dockerfile CMD），不是 8000
+  volumes:
+    - chat_data:/app/data
+  mem_limit: 512m
+```
+
+```nginx
+location ^~ /chat/ {
+    auth_basic "ChatTool";
+    auth_basic_user_file /etc/nginx/conf.d/.htpasswd;
+    proxy_pass http://chattool:8765/;
+    include /etc/nginx/conf.d/proxy_params;   # 含 proxy_buffering off
+}
+```
+
+安全性等价：容器端口不落宿主机，公网只能经 nginx 且要过 Basic Auth，
+§1「不能裸端口暴露」的初衷仍然成立。
+
+### 9.3 踩到的三个坑
+
+**① `requirements.txt` 漏了 `httpx`。**
+`app/llm.py:15`、`app/routes.py:331` 都用 `httpx.AsyncClient`，
+但容器化时只写了 `starlette` + `uvicorn`。本地有 `.venv` 兜着看不出来，
+镜像里没有，`python -m app` 直接 `ModuleNotFoundError` 崩掉重启。
+已补进 `requirements.txt`。
+
+**② `pip install` 失败 ≠ 依赖冲突。**
+补 `httpx` 后构建报 `exit code 1`，我一开始误判成 `httpx` 与 `starlette 1.10.0`
+的 `anyio` 死锁。单独在容器里跑 `pip install` 取证发现**装得好好的**，
+真实原因是构建期网络抖动：日志里 `Connection interrupted while downloading`，
+每个包下载 5–20 秒（正常 <1s），反复重试累计超时。
+→ 教训：`exit 1` 是 pip 通用失败码，"依赖冲突"与"网络超时"必须靠日志区分，
+不要靠猜。已把 pin 从精确版本放宽为范围（`httpx>=0.27,<1` 等），重试即成功。
+
+**③ 不要在子路径 location 上用 `return 301` 补尾斜杠。**
+照抄 watermelon 的 `location = /x { return 301 /x/; }` 会跳转到
+`https://域名:8443/x/`——公网 8080 经 stream 层 `ssl_preread` 只转发 TCP，
+nginx 看不到真实公网端口，只能用内部 `listen` 端口（8443/8180）拼绝对地址，
+而 8443 没映射到公网，**用户点了就是打不开**。
+本项目改为 `/chat`（无斜杠）与 `/chat/` 两个 location 都直接代理，不跳转。
+（顺带发现 watermelon 至今仍踩这个坑，另行处理。）
+
+### 9.4 上线验收（服务器实测）
+
+| 场景 | 期望 | 结果 |
+|---|---|---|
+| 无 Basic Auth 访问 `/chat/` | 401 | ✅ |
+| 带 Auth 访问 `/chat/`、`/chat` | 200，HTML 含 `/chat/static/*` | ✅ |
+| `%%PREFIX%%` 残留 | 0 | ✅ |
+| 5 个静态资源（css/js） | 200 | ✅ |
+| `/chat/api/stats`、`/chat/api/llm/status` | 200 | ✅ |
+| 容器内 `python -m tests.test_deploy_prefix` | 12 项全绿 | ✅ |
+| 宿主机 `ss -lntp` 查 8765 | 未监听（不裸暴露） | ✅ |
+| 旧 `/8000/` | 404 | ✅ |
+| 同机其他项目（主页 / watermelon / interview） | 未受影响 | ✅ |

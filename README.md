@@ -454,13 +454,51 @@ python3 -m app --host 0.0.0.0 --port 8765   # 局域网内手机访问
 python3 -m app --reload                # 开发模式
 ```
 
-依赖：`starlette`、`uvicorn`（Termux 下均已可用，无需 FastAPI/pydantic）。
+依赖：`starlette`、`uvicorn`、`httpx`（`httpx` 是 LLM 调用的 HTTP 客户端，
+`app/llm.py` 与 `app/routes.py` 都依赖它——容器里没有 `.venv` 兜底，漏装会直接崩）。
 
 数据默认落在 `data/chattool.db`，可用环境变量覆盖：
 
 ```bash
 CHATTOOL_DATA=/path/to/data python3 -m app
 ```
+
+## 部署
+
+服务器上挂在 **`/chat` 子路径**（不是根路径，也不是 `/8000`）。
+
+| 项 | 值 |
+|---|---|
+| 入口 | `https://www.shuishen.cloud:8080/chat/`（自签名证书，首次点「继续前往」） |
+| 鉴权 | Nginx Basic Auth（`.htpasswd`）——DB 里存着用户的 LLM API Key，不能裸奔 |
+| 容器端口 | 应用监听 **8765**（`Dockerfile` CMD 写死），compose 里 `expose: ["8765"]` |
+| 数据 | 命名卷 `chat_data` 挂到 `/app/data`，重建容器不丢会话与 Key |
+
+关键环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `CHATTOOL_PREFIX=/chat` | 服务端把 `index.html` 里的 `%%PREFIX%%` 替换成该值，前端 `withPrefix()` 据此拼绝对路径 |
+| `CHATTOOL_DATA=/app/data` | SQLite 所在目录 |
+
+Nginx 侧（与项目内 `doc/feat/deploy-8000.md` 的独立 `127.0.0.1:8765` 方案不同，
+本服务器统一走 compose 服务名 + `expose`）：
+
+```nginx
+location ^~ /chat/ {
+    auth_basic "ChatTool";
+    auth_basic_user_file /etc/nginx/conf.d/.htpasswd;
+    proxy_pass http://chattool:8765/;   # ★ 尾斜杠必须成对，剥掉 /chat 前缀
+    include /etc/nginx/conf.d/proxy_params;   # 含 proxy_buffering off，SSE 必需
+}
+```
+
+**不要在 location 上用 `return 301 /chat/;` 做补斜杠跳转**：公网 8080 经 stream 层
+`ssl_preread` 只转发 TCP，nginx 拿不到真实公网端口，会把跳转拼成
+`https://域名:8443/chat/`（8443 未映射，点了打不开）。本项目改为 `/chat` 与
+`/chat/` 两个 location 都直接代理。
+
+更新流程：本地 commit → push → 服务器 `git pull` → `docker compose up -d --build chattool`。
 
 ## 测试
 

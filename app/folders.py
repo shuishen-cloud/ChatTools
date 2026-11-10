@@ -75,6 +75,26 @@ def set_conv_folders(conv_id: str, folder_ids: list[str]) -> list[str]:
                 conn.execute("SELECT folder_id FROM conv_folder WHERE conv_id=?", (conv_id,))]
 
 
+def set_board_folders(board_id: str, folder_ids: list[str]) -> list[str]:
+    """全量替换画板的文件夹归属（与会话的 set_conv_folders 同语义）。"""
+    with tx() as conn:
+        conn.execute("DELETE FROM board_folder WHERE board_id=?", (board_id,))
+        for fid in folder_ids:
+            conn.execute("INSERT OR IGNORE INTO board_folder(board_id,folder_id) VALUES(?,?)",
+                         (board_id, fid))
+        return [r["folder_id"] for r in conn.execute(
+            "SELECT folder_id FROM board_folder WHERE board_id=?", (board_id,))]
+
+
+def folders_of_board(board_id: str) -> list[dict]:
+    """画板所属文件夹（带颜色，供列表 chip 用）。"""
+    with db() as conn:
+        return [row_to_dict(r) for r in conn.execute(
+            "SELECT f.id, f.name, f.color FROM board_folder bf"
+            " JOIN folder f ON f.id=bf.folder_id"
+            " WHERE bf.board_id=? ORDER BY f.sort_key, f.name", (board_id,))]
+
+
 def folder_tree() -> list[dict]:
     """把扁平文件夹组织成树，便于前端渲染脉络。"""
     flat = list_folders()

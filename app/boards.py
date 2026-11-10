@@ -26,6 +26,11 @@ def list_boards() -> list[dict]:
                 "SELECT COUNT(*) c FROM board_node WHERE board_id=?", (b["id"],)).fetchone()["c"]
             b["edge_count"] = conn.execute(
                 "SELECT COUNT(*) c FROM board_edge WHERE board_id=?", (b["id"],)).fetchone()["c"]
+            # 所属文件夹（侧栏列表要显示 chip、也要能按文件夹筛）
+            b["folders"] = [row_to_dict(r) for r in conn.execute(
+                "SELECT f.id, f.name, f.color FROM board_folder bf"
+                " JOIN folder f ON f.id=bf.folder_id"
+                " WHERE bf.board_id=? ORDER BY f.sort_key, f.name", (b["id"],))]
         return rows
 
 
@@ -73,6 +78,11 @@ def get_board(board_id: str) -> dict | None:
             "SELECT * FROM board_edge WHERE board_id=?", (board_id,))]
         board["nodes"] = nodes
         board["edges"] = edges
+        # 画板所属文件夹
+        board["folders"] = [row_to_dict(r) for r in conn.execute(
+            "SELECT f.id, f.name, f.color FROM board_folder bf"
+            " JOIN folder f ON f.id=bf.folder_id"
+            " WHERE bf.board_id=? ORDER BY f.sort_key, f.name", (board_id,))]
         return board
 
 
@@ -111,9 +121,43 @@ def _touch(conn, board_id: str) -> None:
     conn.execute("UPDATE board SET updated_at=? WHERE id=?", (now(), board_id))
 
 
+def recommend_width(content: str) -> float:
+    """根据内容给一个建议宽度，避免所有卡片一律 232px。
+
+    以前尺寸完全靠用户手动拖，新建的卡片永远 232px：短句浪费空间、
+    代码/表格被硬截断。这里只在用户没指定（w==0）时给建议值，
+    且**写入数据库**——否则刷新后又跳回默认值。
+    """
+    text = content or ""
+    if not text:
+        return 232
+    has_table = "|" in text and text.count("|") >= 4
+    has_code = "```" in text
+    lines = text.splitlines()
+    longest = max((len(x) for x in lines), default=0)
+
+    if has_table or longest > 120:
+        return 400
+    if has_code or len(text) > 200 or longest > 60:
+        return 320
+    return 232
+
+
+def _clamp_size(v, lo: float, hi: float) -> float:
+    """尺寸钳制：0 保留为「未手动调整」，其余夹在 [lo, hi]。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if f <= 0:
+        return 0.0
+    return max(lo, min(hi, f))
+
+
 def add_node(board_id: str, message_id: str | None, conv_id: str | None = None,
              x: float = 0, y: float = 0, note: str = "",
-             color: str = "#6b8afd", content: str = "") -> dict:
+             color: str = "#6b8afd", content: str = "",
+             w: float = 0, h: float = 0) -> dict:
     """把一条消息加入画板。同一消息在同一画板中不重复添加。
 
     message_id 可为 None：此时用 content 作为节点自有文字，
@@ -130,17 +174,34 @@ def add_node(board_id: str, message_id: str | None, conv_id: str | None = None,
                 m = conn.execute("SELECT conv_id FROM message WHERE id=?",
                                  (message_id,)).fetchone()
                 conv_id = m["conv_id"] if m else None
+            # 引用消息时 content 为空（正文从 message 取），
+            # 但算建议宽度需要正文，这里先取出来
+            if not content:
+                m = conn.execute("SELECT content FROM message WHERE id=?",
+                                 (message_id,)).fetchone()
+                if m:
+                    content_for_size = m["content"] or ""
+                else:
+                    content_for_size = ""
+            else:
+                content_for_size = content
+        else:
+            content_for_size = content
         # 未指定坐标时自动排布：按列错开，避免重叠
         if x == 0 and y == 0:
             count = conn.execute("SELECT COUNT(*) c FROM board_node WHERE board_id=?",
                                  (board_id,)).fetchone()["c"]
             x = 40 + (count % 3) * 260
             y = 40 + (count // 3) * 180
+        # 未指定尺寸时按内容给建议值（仅 w==0，不影响用户手动拖过的卡片）
+        if not w and content_for_size:
+            w = recommend_width(content_for_size)
         nid = new_id("n_")
         conn.execute(
-            "INSERT INTO board_node(id,board_id,message_id,conv_id,content,x,y,note,color,created_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (nid, board_id, message_id, conv_id, content, x, y, note, color, now()))
+            "INSERT INTO board_node(id,board_id,message_id,conv_id,content,x,y,w,h,note,color,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (nid, board_id, message_id, conv_id, content, x, y,
+             _clamp_size(w, 120, 900), _clamp_size(h, 60, 1200), note, color, now()))
         _touch(conn, board_id)
         row = conn.execute("SELECT * FROM board_node WHERE id=?", (nid,)).fetchone()
     return row_to_dict(row)
@@ -153,6 +214,11 @@ def update_node(node_id: str, fields: dict) -> dict | None:
         if k in allowed:
             sets.append(f"{k}=?")
             args.append(v)
+    # 尺寸单独处理：走钳制，0 表示回到默认
+    for k, lo, hi in (("w", 120, 900), ("h", 60, 1200)):
+        if k in fields:
+            sets.append(f"{k}=?")
+            args.append(_clamp_size(fields[k], lo, hi))
     with tx() as conn:
         row = conn.execute("SELECT board_id FROM board_node WHERE id=?", (node_id,)).fetchone()
         if not row:

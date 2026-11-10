@@ -345,6 +345,18 @@ async def api_board_update(request):
     return ok(row) if row else err("画板不存在", 404)
 
 
+async def api_board_folders(request):
+    """画板归类到文件夹（多对多，全量替换）。"""
+    board_id = request.path_params["board_id"]
+    body = await read_json(request)
+    return ok({"folder_ids": F.set_board_folders(board_id, body.get("folder_ids") or [])})
+
+
+async def api_board_folders_of(request):
+    board_id = request.path_params["board_id"]
+    return ok(F.folders_of_board(board_id))
+
+
 async def api_board_node_create(request):
     """支持两种节点：
     1) {message_id}: 引用某条消息
@@ -358,7 +370,8 @@ async def api_board_node_create(request):
     return ok(B.add_node(request.path_params["board_id"], mid,
                          body.get("conv_id"), float(body.get("x") or 0),
                          float(body.get("y") or 0), body.get("note") or "",
-                         body.get("color") or "#6b8afd", text))
+                         body.get("color") or "#6b8afd", text,
+                         w=body.get("w") or 0, h=body.get("h") or 0))
 
 
 async def api_board_node(request):
@@ -504,8 +517,7 @@ def create_app() -> Starlette:
         Route("/api/conversations/{conv_id}", api_conv_delete, methods=["DELETE"]),
         Route("/api/conversations/{conv_id}/archive", api_conv_archive,
               methods=["POST", "DELETE"]),
-        Route("/api/conversations/{conv_id}/folders", api_conv_folders, methods=["PUT"]),
-        Route("/api/conversations/{conv_id}/folders/{folder_id}", api_conv_link,
+        Route("/api/conversations/{conv_id}/folders", api_conv_folders, methods=["PUT"]),        Route("/api/conversations/{conv_id}/folders/{folder_id}", api_conv_link,
               methods=["POST", "DELETE"]),
         Route("/api/conversations/{conv_id}/messages", api_msg_create, methods=["POST"]),
         Route("/api/conversations/{conv_id}/generate", api_generate, methods=["POST"]),
@@ -540,6 +552,8 @@ def create_app() -> Starlette:
         Route("/api/boards/{board_id}", api_board_update, methods=["PATCH", "DELETE"]),
         Route("/api/boards/{board_id}/export", api_board_export, methods=["GET"]),
         Route("/api/boards/{board_id}/nodes", api_board_node_create, methods=["POST"]),
+        Route("/api/boards/{board_id}/folders", api_board_folders, methods=["PUT"]),
+        Route("/api/boards/{board_id}/folders", api_board_folders_of, methods=["GET"]),
         Route("/api/boards/{board_id}/edges", api_board_edges, methods=["POST"]),
         Route("/api/board-nodes/{node_id}", api_board_node, methods=["PATCH", "DELETE"]),
         Route("/api/board-edges/{edge_id}", api_board_edge, methods=["PATCH", "DELETE"]),

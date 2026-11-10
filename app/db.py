@@ -94,11 +94,24 @@ CREATE TABLE IF NOT EXISTS board_node (
     content     TEXT NOT NULL DEFAULT '',
     x           REAL NOT NULL DEFAULT 0,
     y           REAL NOT NULL DEFAULT 0,
+    -- 节点尺寸：0 表示用默认值（前端 CSS 默认宽度），>0 为用户手动调整过的
+    w           REAL NOT NULL DEFAULT 0,
+    h           REAL NOT NULL DEFAULT 0,
     note        TEXT NOT NULL DEFAULT '',
     color       TEXT NOT NULL DEFAULT '#6b8afd',
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bnode_board ON board_node(board_id);
+
+-- 画板与文件夹：多对多。
+-- 不给 board 直接加 folder_id：文件夹本身支持嵌套，且会话已是多对多，
+-- 画板没有理由退化成单亲。同一套 folder 表服务两种对象。
+CREATE TABLE IF NOT EXISTS board_folder (
+    board_id  TEXT NOT NULL REFERENCES board(id)  ON DELETE CASCADE,
+    folder_id TEXT NOT NULL REFERENCES folder(id) ON DELETE CASCADE,
+    PRIMARY KEY (board_id, folder_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bfolder_folder ON board_folder(folder_id);
 
 -- 画板连线：节点间的关系，label 描述关系语义
 CREATE TABLE IF NOT EXISTS board_edge (
@@ -199,9 +212,23 @@ def _migrate_board_node_content(conn) -> None:
         conn.execute("ALTER TABLE board_node ADD COLUMN content TEXT NOT NULL DEFAULT ''")
 
 
+def _migrate_board_node_size(conn) -> None:
+    """给旧库的 board_node 补上 w / h（节点可手动调整尺寸）。
+
+    默认 0 = 用前端默认尺寸；只有用户真正拖过右下角才会写入具体数值，
+    否则以后调整默认尺寸时，旧节点会停在旧数值上。
+    """
+    cols = {c["name"] for c in conn.execute("PRAGMA table_info(board_node)")}
+    for col in ("w", "h"):
+        if col not in cols:
+            conn.execute(
+                f"ALTER TABLE board_node ADD COLUMN {col} REAL NOT NULL DEFAULT 0")
+
+
 def init_db() -> None:
     with db() as conn:
         # 先确保旧表存在，迁移才有的可改
         conn.executescript(SCHEMA)
         _migrate(conn)
         _migrate_board_node_content(conn)
+        _migrate_board_node_size(conn)

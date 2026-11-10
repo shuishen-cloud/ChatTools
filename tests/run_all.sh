@@ -5,6 +5,18 @@ cd "$(dirname "$0")/.."
 echo "===== 后端 API 测试 ====="
 python3 -m tests.test_api
 echo
+echo "===== 画板作为一级视图 ====="
+python3 -m tests.test_board_view
+echo
+echo "===== 画板融入系统（归类/尺寸/Markdown）====="
+python3 -m tests.test_board_integration
+echo
+echo "===== 多对话 tab ====="
+python3 -m tests.test_chat_tabs
+echo
+echo "===== tab 状态机（行为）====="
+node tests/tab_state.test.js
+echo
 echo "===== 服务端 Markdown 测试 ====="
 python3 -m tests.test_markdown
 echo

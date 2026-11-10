@@ -28,6 +28,13 @@ function fatal(where, err) {
 window.addEventListener("error", (e) => fatal("脚本错误", e.error || e.message));
 window.addEventListener("unhandledrejection", (e) => fatal("未处理的 Promise", e.reason));
 
+/* 把对话状态暴露给 panels.js 使用。
+ *
+ * 原因：panels.js 里的 Board / AskPanel 各自在闭包内定义了 `state`，
+ * 会遮蔽这里的全局 `state`，直接写 `state.activeConv` 永远拿到 undefined。
+ * 用一个显式命名的引用，避免两边同名状态互相踩。 */
+window.__chattoolAppState = state;
+
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -181,7 +188,6 @@ function showConvMenu(convId, anchor) {
   if (menu.parentElement !== document.body) document.body.appendChild(menu);
 
   menu.innerHTML = `
-    <button data-act="open">打开</button>
     <button data-act="rename">重命名</button>
     <button data-act="folders">归类到文件夹…</button>
     <hr>
@@ -203,7 +209,6 @@ function showConvMenu(convId, anchor) {
     if (!b) return;
     closeConvMenu();
     const act = b.dataset.act;
-    if (act === "open") return openConv(conv.id);
     if (act === "rename") return renameConv(conv.id, conv.title);
     if (act === "folders") { await openConv(conv.id); return openFolderPicker(); }
     if (act === "archive") return archived ? unarchiveConv(conv.id) : archiveConvById(conv.id);
@@ -218,6 +223,12 @@ function closeConvMenu() {
   $("#conv-more-menu")?.classList.remove("open");
   const btn = $("#btn-conv-more");
   if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+/** 顶栏「⋯」菜单开合 */
+function closeTopMenu() {
+  $("#top-more-menu")?.classList.remove("open");
+  $("#btn-top-more")?.setAttribute("aria-expanded", "false");
 }
 
 async function renameConv(convId, current) {
@@ -369,6 +380,8 @@ async function openConv(id) {
   renderConvFolders();
   renderMessages();
   renderConvs();
+  // 会话标题变了，顶部 tab 要跟着变
+  try { Board?.renderTabs?.(); } catch { /* 画板未就绪时忽略 */ }
   // 右侧历史栏
   await ThreadView.load(id).catch(() => {});
   AskPanel.reset(id);
@@ -442,13 +455,19 @@ function renderMessages() {
         ${editing ? "" : `<div class="msg-foot">
           <button class="tool-btn ${m.favorite ? "on" : ""}" data-act="fav" data-id="${m.id}">
             ${m.favorite ? "⭐ 已收藏" : "☆ 收藏"}</button>
-          <button class="tool-btn" data-act="edit" data-id="${m.id}">✎ 编辑分支</button>
-          <button class="tool-btn" data-act="tag" data-id="${m.id}"># 标签</button>
-          <button class="tool-btn" data-act="branch" data-id="${m.id}">⌥ 查看分支</button>
+          <button class="tool-btn" data-act="edit" data-id="${m.id}">✎ 编辑</button>
           <button class="tool-btn" data-act="ask" data-id="${m.id}">💬 提问</button>
-          <button class="tool-btn" data-act="board" data-id="${m.id}">＋ 画板</button>
-          ${m.role === "user" ? `<button class="tool-btn" data-act="regen" data-id="${m.id}">↻ 重新生成</button>` : ""}
-          <button class="tool-btn" data-act="del" data-id="${m.id}">🗑</button>
+          <details class="foot-more">
+            <summary class="tool-btn">⋯</summary>
+            <div class="foot-more-menu">
+              <button class="tool-btn" data-act="tag" data-id="${m.id}"># 标签</button>
+              <button class="tool-btn" data-act="branch" data-id="${m.id}">⌥ 查看分支</button>
+              <button class="tool-btn" data-act="board" data-id="${m.id}">＋ 画板</button>
+              <button class="tool-btn" data-act="board-other" data-id="${m.id}">加入其他画板…</button>
+              ${m.role === "user" ? `<button class="tool-btn" data-act="regen" data-id="${m.id}">↻ 重新生成</button>` : ""}
+              <button class="tool-btn is-danger" data-act="del" data-id="${m.id}">🗑 删除</button>
+            </div>
+          </details>
         </div>`}
       </div>`;
   }).join("");
@@ -812,15 +831,6 @@ async function saveTitle() {
   loadConvs();
 }
 
-async function archiveConv() {
-  return state.activeConv ? archiveConvById(state.activeConv.id) : undefined;
-}
-
-async function deleteConv() {
-  return state.activeConv
-    ? deleteConvById(state.activeConv.id, state.activeConv.title) : undefined;
-}
-
 /** 打开应用时进入一个「可立即输入」的界面。
  *
  * 关键行为：不要自动跳进历史会话——那会让用户每次打开都被塞进
@@ -854,6 +864,8 @@ async function newConversation() {
   });
   await loadConvs();
   await openConv(conv.id);
+  // 新会话开成一个 tab（已存在则只切过去）
+  try { await Board?.openChatTab?.(conv.id); } catch { /* 忽略 */ }
   $("#conv-title").focus();
 }
 
@@ -1002,6 +1014,10 @@ function switchView(name) {
   $$(".pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === name));
   if (name === "favorites") loadFavorites();
   if (name === "folders") loadFolders();
+  // 画板标签：每次进入都刷新，才能看到其它入口刚改动的节点数/归类
+  if (name === "boards") {
+    Board.loadBoards().then(() => Board.renderSidebarList()).catch(() => {});
+  }
 }
 
 /* ---------------------------------------------------------------- 设置：API Key */
@@ -1156,16 +1172,31 @@ function bind() {
 
   /* ---- 顶栏 ---- */
   guard("顶栏", () => {
-    on("#btn-menu", "click", () => $("#sidebar").classList.toggle("open"));
     on("#btn-new", "click", newConversation);
-    on("#btn-archive", "click", archiveConv);
-    on("#btn-del-conv", "click", deleteConv);
+    on("#btn-new-board", "click", async () => {
+      const name = prompt("画板名称", "新画板");
+      if (!name) return;
+      const b = await api("/api/boards", { method: "POST", body: { name } });
+      await Board.loadBoards();
+      await Board.openBoardTab(b.id);
+      toast(`已创建「${b.name}」`);
+    });
     on("#btn-settings", "click", openSettings);
     on("#btn-share", "click", () => { $("#share-out").innerHTML = ""; $("#modal-share").hidden = false; });
     on("#btn-do-share", "click", doShare);
-    on("#btn-import", "click", () => ($("#modal-import").hidden = false));
+    on("#btn-import", "click", () => { closeTopMenu(); $("#modal-import").hidden = false; });
     on("#btn-do-import", "click", doImport);
-    on("#btn-snippets", "click", () => AskPanel.openHistory());
+    on("#btn-snippets", "click", () => { closeTopMenu(); AskPanel.openHistory(); });
+    // 顶栏「⋯」：低频入口（导入 / 画板 / 历史 / 提问记录）收进菜单，保持顶栏只留主操作
+    on("#btn-top-more", "click", (e) => {
+      e.stopPropagation();
+      const open = $("#top-more-menu")?.classList.contains("open");
+      closeTopMenu();
+      if (!open) {
+        $("#top-more-menu")?.classList.add("open");
+        $("#btn-top-more")?.setAttribute("aria-expanded", "true");
+      }
+    });
     // 顶栏 ⋯：作用于当前会话
     on("#btn-conv-more", "click", (e) => {
       e.stopPropagation();
@@ -1198,6 +1229,8 @@ function bind() {
       searchTimer = setTimeout(() => {
         state.search = e.target.value.trim();
         loadConvs();
+        // 画板列表也复用同一个搜索框过滤
+        try { Board?.renderSidebarList?.(); } catch { /* 未就绪 */ }
       }, 250);
     });
     on("#global-search", "keydown", (e) => { if (e.key === "Escape") e.target.value = ""; });
@@ -1212,7 +1245,15 @@ function bind() {
         const item = e.target.closest?.(".conv-item");
         if (!item) return;
         if (btn) return showConvMenu(item.dataset.id, btn);
-        if (openOnClick) openConv(item.dataset.id);
+        // 点会话 = 开/切到该会话的 tab（已开则切过去，不重复开）
+        if (openOnClick) {
+          const id = item.dataset.id;
+          if (typeof Board !== "undefined" && Board?.openChatTab) {
+            Board.openChatTab(id).catch(() => openConv(id));
+          } else {
+            openConv(id);
+          }
+        }
       };
       box.oncontextmenu = (e) => {
         const item = e.target.closest(".conv-item");
@@ -1298,7 +1339,12 @@ function bind() {
         return;
       }
       if (act === "board") {
-        await Board.addMessage(id, state.activeConv.id);
+        await Board.addToActiveBoard(id, state.activeConv.id);
+        return;
+      }
+      if (act === "board-other") {
+        // 强制弹窗选择（即使已经有“上次的画板”）
+        await Board.addMessage(id, state.activeConv.id, { forcePick: true });
         return;
       }
       if (act === "regen") { await generateReply({ fromId: id }); return; }
@@ -1323,7 +1369,9 @@ function bind() {
     on("#btn-thread", "click", () => toggleThread());
     on("#btn-thread-toggle", "click", () => toggleThread());
     let scrollTick = false;
-    on("#main", "scroll", () => {
+    // 滚动实际发生在 #detail 内部（.main 不再自己滚），监听必须跟着改，
+    // 否则右侧历史栏的双向联动会静默失效
+    on("#detail", "scroll", () => {
       if (scrollTick) return;
       scrollTick = true;
       requestAnimationFrame(() => {
@@ -1331,6 +1379,61 @@ function bind() {
         ThreadView.setActiveFromScroll();
       });
     }, { passive: true });
+  });
+
+  /* ---- 侧栏开合（专注模式）---- */
+  guard("侧栏开合", () => {
+    const sidebar = $("#sidebar");
+    if (!sidebar) return;
+    const isMobile = () => window.innerWidth <= 760;
+
+    const applyBtn = () => {
+      const btn = $("#btn-menu");
+      if (!btn) return;
+      // 收起状态才点亮，提示“可以展开”
+      const closed = isMobile()
+        ? !sidebar.classList.contains("open")
+        : sidebar.classList.contains("collapsed");
+      btn.classList.toggle("on", closed);
+      btn.setAttribute("aria-expanded", String(!closed));
+      btn.title = closed ? "展开侧栏" : "收起侧栏";
+    };
+
+    const toggleSidebar = () => {
+      if (isMobile()) {
+        sidebar.classList.toggle("open");
+      } else {
+        // 桌面端：折叠成 0 宽，把空间全让给对话
+        sidebar.classList.toggle("collapsed");
+        try {
+          localStorage.setItem("chattool.sidebar",
+            sidebar.classList.contains("collapsed") ? "collapsed" : "open");
+        } catch { /* 隐私模式忽略 */ }
+      }
+      applyBtn();
+    };
+
+    // 恢复上次状态（仅桌面端；手机端始终是抽屉）
+    try {
+      if (!isMobile() && localStorage.getItem("chattool.sidebar") === "collapsed") {
+        sidebar.classList.add("collapsed");
+      }
+    } catch { /* 忽略 */ }
+
+    on("#btn-menu", "click", toggleSidebar);
+    // 手机端点主区关闭抽屉
+    on("#main", "click", () => {
+      if (isMobile() && sidebar.classList.contains("open")) {
+        sidebar.classList.remove("open");
+        applyBtn();
+      }
+    });
+    // 缩放到桌面时清掉抽屉状态，避免侧栏卡在“开了但窄屏样式”
+    window.addEventListener("resize", () => {
+      if (!isMobile()) sidebar.classList.remove("open");
+      applyBtn();
+    });
+    applyBtn();
   });
 
   /* ---- 悬浮提问 ---- */
@@ -1341,7 +1444,6 @@ function bind() {
     Board.bind();
     Board.loadBoards().catch(() => {});
   });
-
   /* ---- 弹窗通用关闭 ---- */
   guard("弹窗", () => {
     $$("[data-close]").forEach((b) => (b.onclick = () => (b.closest(".modal").hidden = true)));
@@ -1391,6 +1493,8 @@ function bind() {
       $("#export-menu")?.classList.remove("open");
       // 菜单内部的点击不要关（交给菜单自己的 handler 处理）；
       // 触发按钮（顶栏 ⋯ 与列表里的 ⋯）也不要关，否则“开了又被关”。
+      if (e.target.closest?.("#top-more-menu") || e.target.closest?.("#btn-top-more")) return;
+      closeTopMenu();
       if (e.target.closest?.("#conv-more-menu")) return;
       if (e.target.closest?.("[data-act='menu']")) return;
       if (e.target.closest?.("#btn-conv-more")) return;
@@ -1417,7 +1521,9 @@ function bind() {
   await loadFolders().catch((e) => fatal("加载文件夹", e));
   await loadConvs().catch((e) => fatal("加载会话列表", e));
   await loadComposerOptions().catch(() => { /* 离线/无 Key 时忽略 */ });
-  Board.loadBoards().catch(() => {});
+  await Board.loadBoards().catch(() => {});
+  // 恢复上次的一级视图（对话 / 某块画板），刷新不丢位置
+  await Board.restoreView().catch(() => {});
   try {
     await ensureConversation();      // 一进来就有可输入的对话界面
   } catch (e) {
